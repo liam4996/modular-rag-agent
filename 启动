@@ -1,0 +1,15 @@
+# 激活环境
+.venv\Scripts\Activate.ps1
+
+# 启动 Dashboard
+python scripts/start_dashboard.py
+
+# 摄取文档
+python scripts/ingest.py <文件路径>
+
+# 查询
+python scripts/query.py "你的问题"
+
+python scripts/run_agent.py
+
+.venv\Scripts\python.exe scripts/run_agent.py

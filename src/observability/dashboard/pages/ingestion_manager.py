@@ -16,13 +16,15 @@ import streamlit as st
 from src.observability.dashboard.services.data_service import DataService
 
 
-def _run_ingestion(
+def _run_ingestion_single(
     uploaded_file: "st.runtime.uploaded_file_manager.UploadedFile",
     collection: str,
     progress_bar: "st.delta_generator.DeltaGenerator",
     status_text: "st.delta_generator.DeltaGenerator",
-) -> None:
-    """Save the uploaded file to a temp location and run the pipeline."""
+    file_index: int = 0,
+    total_files: int = 1,
+) -> bool:
+    """Save a single uploaded file to a temp location and run the pipeline."""
     from src.core.settings import load_settings
     from src.core.trace import TraceContext, TraceCollector
     from src.ingestion.pipeline import IngestionPipeline
@@ -48,13 +50,14 @@ def _run_ingestion(
         frac = (current - 1) / total  # stage just started, show partial progress
         label = _STAGE_LABELS.get(stage, stage)
         progress_bar.progress(frac, text=f"[{current}/{total}] {label}")
-        status_text.caption(label)
+        status_text.caption(f"[{file_index + 1}/{total_files}] {uploaded_file.name}: {label}")
 
     trace = TraceContext(trace_type="ingestion")
     trace.metadata["source_path"] = uploaded_file.name
     trace.metadata["collection"] = collection
     trace.metadata["source"] = "dashboard"
 
+    success = False
     try:
         pipeline = IngestionPipeline(settings, collection=collection)
         pipeline.run(
@@ -62,10 +65,9 @@ def _run_ingestion(
             trace=trace,
             on_progress=on_progress,
         )
-        progress_bar.progress(1.0, text="✅ Complete")
-        status_text.success(f"Successfully ingested **{uploaded_file.name}** into collection **{collection}**.")
+        success = True
     except Exception as exc:
-        status_text.error(f"Ingestion failed: {exc}")
+        status_text.error(f"[{file_index + 1}/{total_files}] {uploaded_file.name} failed: {exc}")
     finally:
         TraceCollector().collect(trace)
         # Clean up temp file
@@ -73,6 +75,30 @@ def _run_ingestion(
             Path(tmp_path).unlink(missing_ok=True)
         except Exception:
             pass
+    
+    return success
+
+
+def _run_ingestion(
+    uploaded_files: list,
+    collection: str,
+    progress_bar: "st.delta_generator.DeltaGenerator",
+    status_text: "st.delta_generator.DeltaGenerator",
+) -> None:
+    """Save multiple uploaded files to temp locations and run the pipeline."""
+    total_files = len(uploaded_files)
+    success_count = 0
+    
+    for idx, uploaded_file in enumerate(uploaded_files):
+        status_text.info(f"Processing [{idx + 1}/{total_files}]: {uploaded_file.name}...")
+        if _run_ingestion_single(uploaded_file, collection, progress_bar, status_text, idx, total_files):
+            success_count += 1
+    
+    # Final summary
+    if success_count == total_files:
+        status_text.success(f"✅ Successfully ingested {success_count}/{total_files} files into collection **{collection}**.")
+    else:
+        status_text.warning(f"⚠️ Ingested {success_count}/{total_files} files. Some files failed.")
 
 
 def render() -> None:
@@ -84,19 +110,21 @@ def render() -> None:
 
     col1, col2 = st.columns([3, 1])
     with col1:
-        uploaded = st.file_uploader(
-            "Select a file to ingest",
+        uploaded_files = st.file_uploader(
+            "Select files to ingest (支持多选)",
             type=["pdf", "txt", "md", "docx"],
+            accept_multiple_files=True,
             key="ingest_uploader",
         )
     with col2:
         collection = st.text_input("Collection", value="default", key="ingest_collection")
 
-    if uploaded is not None:
+    if uploaded_files:
+        st.caption(f"已选择 {len(uploaded_files)} 个文件")
         if st.button("🚀 Start Ingestion", key="btn_ingest"):
             progress_bar = st.progress(0, text="Preparing…")
             status_text = st.empty()
-            _run_ingestion(uploaded, collection.strip() or "default", progress_bar, status_text)
+            _run_ingestion(uploaded_files, collection.strip() or "default", progress_bar, status_text)
 
     st.divider()
 
