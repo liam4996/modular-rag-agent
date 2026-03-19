@@ -44,6 +44,16 @@ def _page_evaluation_panel() -> None:
     render()
 
 
+def _page_test_panel() -> None:
+    from src.observability.dashboard.pages.test_panel import render
+    render()
+
+
+def _page_agent_chat() -> None:
+    from src.observability.dashboard.pages.agent_chat import render
+    render()
+
+
 # ── Navigation ───────────────────────────────────────────────────────
 
 pages = [
@@ -53,6 +63,8 @@ pages = [
     st.Page(_page_ingestion_traces, title="Ingestion Traces", icon="🔬"),
     st.Page(_page_query_traces, title="Query Traces", icon="🔎"),
     st.Page(_page_evaluation_panel, title="Evaluation Panel", icon="📏"),
+    st.Page(_page_test_panel, title="Test Panel", icon="🧪"),
+    st.Page(_page_agent_chat, title="Agent Chat", icon="🤖"),
 ]
 
 

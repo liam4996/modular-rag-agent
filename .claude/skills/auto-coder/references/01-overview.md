@@ -1,45 +1,99 @@
-## 1. 项目概述
-本项目基于多阶段检索增强生成（RAG, Retrieval-Augmented Generation）与模型上下文协议（MCP, Model Context Protocol）设计，目标是搭建一个可扩展、高可观测、易迭代的智能问答与知识检索框架。
+# 多智能体 RAG 系统 - 项目概述
 
-### 设计理念 (Design Philosophy)
+## 📋 项目信息
 
-> **核心定位：自学与教学同步 (Learning by Teaching)**
-> 
-> 本项目是我个人技术学习、丰富简历、备战面试的实战历程，同时也是一份同步教学的开源资源。我相信"**教是最好的学**"——在整理代码、撰写文档、录制视频的过程中，我自己对 RAG 的理解也在不断深化。希望这份"边学边教"的成果能够帮助到更多同样在求职路上的朋友。
+- **项目名称**: Multi-Agent RAG System
+- **版本**: v2.0 (生产增强版)
+- **SPEC 文档**: `docs/MULTI_AGENT_SPEC.md`
+- **创建时间**: 2026-03-18
 
-本项目不仅是一个功能完备的智能问答框架，更是一个专为 **RAG 技术学习与面试求职** 设计的实战平台：
+## 🎯 设计目标
 
-#### 1️⃣ 实战驱动学习 (Learn by Doing)
-项目架构本身就是 RAG 面试题的"**活体答案**"。我们将经典面试考点直接融入代码设计，通过动手实践来巩固理论知识：
-- 分层检索 (Hierarchical Retrieval)
-- Hybrid Search (BM25 + Dense Embedding)
-- Rerank 重排序机制
-- Embedding 策略与优化
-- RAG 性能评测 (Ragas/DeepEval)
+构建一个**生产级**的多智能体 RAG 系统，在原有架构基础上增加：
 
-#### 2️⃣ 开箱即用与深度扩展并重 (Plug-and-Play & Extensible)
-- **开箱即用**：提供 MCP 标准接口，可直接对接 Copilot/Claude，拿到项目即可运行体验。
-- **深度扩展**：保留完全模块化的内部结构，方便开发者替换组件、魔改算法，作为具备深度的个人简历项目。
-- **扩展指引**：文档中会明确指出各模块的扩展方向与建议，帮助你在掌握基础后继续深入迭代。
+1. ✅ **容错机制**：最大重试次数 + 兜底策略
+2. ✅ **并行融合**：支持多 Agent 并行检索
+3. ✅ **溯源与忠实度**：答案必须标注来源，严格基于检索内容
 
-#### 3️⃣ 配套教学资源 (Comprehensive Learning Materials)
-我会提供**三位一体**的配套学习资源，帮助你快速吃透项目：
+## 🏗️ 核心架构
 
-| 资源类型 | 内容说明 |
-|---------|---------|
-| 📄 **技术文档** | 架构设计文档、技术选型说明、模块详解 |
-| 💻 **代码示范** | 带详细注释的源码、关键模块的 Step-by-step 实现 |
-| 🎬 **视频讲解** | RAG 核心知识点回顾、代码细节精讲、环境配置教程 |
+```
+Router Agent → Parallel Fusion Controller → [Search Agent + Web Agent] → Eval Agent → Generate Agent
+                                              ↓
+                                         Blackboard (共享状态)
+```
 
-#### 4️⃣ 学习路线与面试指南 (Study Guide & Interview Prep)
-针对每个模块，我会整理：
-- **📚 知识点清单**：这块涉及哪些理论知识需要提前学习（如 BM25 原理、FAISS 索引类型、Cross-Encoder vs Bi-Encoder）
-- **❓ 高频面试题**：结合项目代码讲解常见面试问题及参考答案
-- **📝 简历撰写建议**：如何将本项目的亮点写进简历，突出技术深度
+## 📦 核心组件
 
-#### 5️⃣ 社区交流与持续迭代 (Community & Iteration)
-- **经验分享**：我自己的面试经历、大家使用本项目面试的反馈，都会汇总沉淀
-- **问题讨论**：一起探讨"如何将本项目写进简历"、"针对本项目的面试题怎么答"
-- **持续更新**：从代码 → 八股知识 → 面试技巧，形成完整的求职知识库，帮助大家更好地拿到 Offer 🎯
+| 组件 | 职责 | 位置 |
+|------|------|------|
+| Router Agent | 意图识别 + 路由决策 | `src/agent/multi_agent/router_agent.py` |
+| Parallel Fusion Controller | 并行融合控制器 | `src/agent/multi_agent/parallel_controller.py` |
+| Search Agent | 本地知识库检索 | `src/agent/multi_agent/search_agent.py` |
+| Web Agent | 联网搜索 | `src/agent/multi_agent/web_agent.py` |
+| Eval Agent | 质量评估 + 重试控制 | `src/agent/multi_agent/eval_agent.py` |
+| Refine Agent | 查询优化 | `src/agent/multi_agent/refine_agent.py` |
+| Generate Agent | 最终生成 + 溯源 + 兜底 | `src/agent/multi_agent/generate_agent.py` |
+| Blackboard | 共享状态容器 | `src/agent/multi_agent/state.py` |
 
----
+## 🚀 实施阶段
+
+### Phase 1: 核心架构（1-2 天）
+- [ ] 创建 `AgentState` 增强版
+- [ ] 实现 `RouterAgent` 支持并行路由
+- [ ] 实现 `ParallelFusionController`
+- [ ] 更新 `SearchAgent` 和 `WebAgent`
+
+### Phase 2: 容错机制（1-2 天）
+- [ ] 实现 `EvalAgent` 重试控制
+- [ ] 实现 `RefineAgent` 重试计数
+- [ ] 实现 `GenerateAgent` 兜底回复
+- [ ] 添加 `max_retries` 配置
+
+### Phase 3: 溯源与忠实度（1 天）
+- [ ] 实现 `Citation` 数据类
+- [ ] 更新 `GenerateAgent` 溯源逻辑
+- [ ] 添加忠实度检查
+
+### Phase 4: 测试与优化（1-2 天）
+- [ ] 单元测试
+- [ ] 集成测试
+- [ ] 性能测试
+- [ ] 边界场景测试（兜底）
+
+### Phase 5: 文档与演示（1 天）
+- [ ] 更新架构文档
+- [ ] 创建演示脚本
+- [ ] 编写使用指南
+
+## 📝 关键特性
+
+### 1. 共享状态（Blackboard Pattern）
+所有 Agent 共享同一个 `AgentState`，通过 `blackboard` 读写数据。
+
+### 2. 并行融合检索
+Router 可以决定同时调用多个 Agent，通过 `ThreadPoolExecutor` 并行执行。
+
+### 3. 容错机制
+- `retry_count`: 当前重试次数
+- `max_retries`: 最大重试次数（默认 2）
+- `fallback_triggered`: 是否触发兜底
+- `fallback_reason`: 兜底原因
+
+### 4. 溯源与忠实度
+- 每个 claim 必须有 citation
+- 严格基于检索内容，不臆造信息
+- 兜底回复礼貌且有帮助
+
+## 🎯 成功标准
+
+- ✅ 所有 Phase 完成
+- ✅ 通过所有测试
+- ✅ 性能指标达标（响应时间、准确率等）
+- ✅ 文档完整
+
+## 📚 参考文档
+
+- **主 SPEC**: `docs/MULTI_AGENT_SPEC.md`
+- **现有架构**: `docs/LANGGRAPH_AGENT.md`
+- **工作流文档**: `docs/LANGGRAPH_WORKFLOW.md`

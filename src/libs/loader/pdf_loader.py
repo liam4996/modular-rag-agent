@@ -29,6 +29,12 @@ try:
 except ImportError:
     PYMUPDF_AVAILABLE = False
 
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    PDFPLUMBER_AVAILABLE = False
+
 from PIL import Image
 import io
 
@@ -100,12 +106,24 @@ class PdfLoader(BaseLoader):
         doc_id = f"doc_{doc_hash[:16]}"
         
         # Parse PDF with MarkItDown
+        text_content = None
         try:
             result = self._markitdown.convert(str(path))
             text_content = result.text_content if hasattr(result, 'text_content') else str(result)
+            # Check if result contains garbled CID characters
+            if text_content and self._is_garbled(text_content):
+                logger.warning(f"MarkItDown produced garbled output for {path}, trying fallback...")
+                text_content = None
         except Exception as e:
-            logger.error(f"Failed to parse PDF {path}: {e}")
-            raise RuntimeError(f"PDF parsing failed: {e}") from e
+            logger.warning(f"MarkItDown failed for {path}: {e}")
+
+        # Fallback: use pdfplumber if MarkItDown failed or produced garbled output
+        if not text_content:
+            try:
+                text_content = self._parse_with_pdfplumber(path)
+            except Exception as e:
+                logger.error(f"Failed to parse PDF {path}: {e}")
+                raise RuntimeError(f"PDF parsing failed: {e}") from e
         
         # Initialize metadata
         metadata: Dict[str, Any] = {
@@ -298,6 +316,61 @@ class PdfLoader(BaseLoader):
             # Graceful degradation: return original text without images
             return text_content, []
     
+    def _is_garbled(self, text: str) -> bool:
+        """Check if text contains garbled CID characters.
+
+        Args:
+            text: Text to check.
+
+        Returns:
+            True if text appears to be garbled, False otherwise.
+        """
+        if not text:
+            return False
+
+        cid_count = text.count("(cid:")
+        if cid_count == 0:
+            return False
+
+        # Even a small number of CID markers indicates font-mapping failure.
+        # Threshold: >5 CID markers, OR CID patterns make up >2% of total length.
+        if cid_count > 5:
+            return True
+
+        import re
+        cid_chars_len = sum(len(m) for m in re.findall(r'\(cid:\d+\)', text))
+        if len(text) > 0 and cid_chars_len / len(text) > 0.02:
+            return True
+
+        return False
+
+    def _parse_with_pdfplumber(self, pdf_path: Path) -> str:
+        """Parse PDF using pdfplumber as fallback.
+
+        Args:
+            pdf_path: Path to PDF file.
+
+        Returns:
+            Extracted text content.
+        """
+        if not PDFPLUMBER_AVAILABLE:
+            raise ImportError(
+                "pdfplumber is required for fallback PDF parsing. "
+                "Install with: pip install pdfplumber"
+            )
+
+        text_parts = []
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                # Extract text from page
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+                    # Add page separator
+                    text_parts.append(f"\n\n--- Page {page_num + 1} ---\n\n")
+
+        return "".join(text_parts)
+
     @staticmethod
     def _generate_image_id(doc_hash: str, page: int, sequence: int) -> str:
         """Generate unique image ID.

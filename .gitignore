@@ -62,3 +62,21 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Temporary test/diagnostic scripts (root only)
+/test_*.py
+/_diag_*.py
+/_test_*.py
+
+# Generated images
+Generated_image.png
+
+# IDE specific
+.trae/
+.cursor/
+
+# User notes
+[ User Query ].txt
+
+# Resume skills (personal)
+resume-skills/

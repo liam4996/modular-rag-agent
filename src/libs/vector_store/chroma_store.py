@@ -433,9 +433,22 @@ class ChromaStore(BaseVectorStore):
         
         return where
     
+    def list_collections(self) -> List[str]:
+        """List all collection names in the ChromaDB database.
+
+        Returns:
+            List of collection names.
+        """
+        try:
+            collections = self.client.list_collections()
+            return sorted(c.name for c in collections)
+        except Exception as e:
+            logger.warning(f"Failed to list collections: {e}")
+            return [self.collection_name]
+
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get statistics about the current collection.
-        
+
         Returns:
             Dict containing collection statistics:
                 - count: Number of records in collection

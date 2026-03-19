@@ -56,11 +56,12 @@ class ChunkRefiner(BaseTransform):
         self._prompt_path = prompt_path or str(resolve_path("config/prompts/chunk_refinement.txt"))
         
         # Determine if LLM should be used
-        self.use_llm = getattr(
-            getattr(settings, 'ingestion', None), 
-            'chunk_refiner', 
-            {}
-        ).get('use_llm', False) if hasattr(settings, 'ingestion') else False
+        ingestion_settings = getattr(settings, 'ingestion', None)
+        self.use_llm = False
+        if ingestion_settings is not None:
+            chunk_refiner_settings = getattr(ingestion_settings, 'chunk_refiner', None)
+            if chunk_refiner_settings is not None:
+                self.use_llm = chunk_refiner_settings.get('use_llm', False) if isinstance(chunk_refiner_settings, dict) else False
         
     @property
     def llm(self) -> Optional[BaseLLM]:

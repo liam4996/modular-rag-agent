@@ -23,6 +23,7 @@ def _run_ingestion_single(
     status_text: "st.delta_generator.DeltaGenerator",
     file_index: int = 0,
     total_files: int = 1,
+    force: bool = False,
 ) -> bool:
     """Save a single uploaded file to a temp location and run the pipeline."""
     from src.core.settings import load_settings
@@ -59,13 +60,24 @@ def _run_ingestion_single(
 
     success = False
     try:
-        pipeline = IngestionPipeline(settings, collection=collection)
-        pipeline.run(
+        pipeline = IngestionPipeline(settings, collection=collection, force=force)
+        result = pipeline.run(
             file_path=tmp_path,
             trace=trace,
             on_progress=on_progress,
         )
-        success = True
+        # Check if pipeline was successful AND generated chunks
+        if result.success and result.chunk_count > 0:
+            success = True
+        elif result.success and result.chunk_count == 0:
+            # File was skipped (already processed)
+            if force:
+                status_text.warning(f"[{file_index + 1}/{total_files}] {uploaded_file.name} was skipped (file content unchanged).")
+            else:
+                status_text.warning(f"[{file_index + 1}/{total_files}] {uploaded_file.name} was skipped (already processed). Enable 'Force' to reprocess.")
+            success = True  # Still consider it success, just skipped
+        else:
+            status_text.error(f"[{file_index + 1}/{total_files}] {uploaded_file.name} failed: {result.error}")
     except Exception as exc:
         status_text.error(f"[{file_index + 1}/{total_files}] {uploaded_file.name} failed: {exc}")
     finally:
@@ -84,6 +96,7 @@ def _run_ingestion(
     collection: str,
     progress_bar: "st.delta_generator.DeltaGenerator",
     status_text: "st.delta_generator.DeltaGenerator",
+    force: bool = False,
 ) -> None:
     """Save multiple uploaded files to temp locations and run the pipeline."""
     total_files = len(uploaded_files)
@@ -91,7 +104,7 @@ def _run_ingestion(
     
     for idx, uploaded_file in enumerate(uploaded_files):
         status_text.info(f"Processing [{idx + 1}/{total_files}]: {uploaded_file.name}...")
-        if _run_ingestion_single(uploaded_file, collection, progress_bar, status_text, idx, total_files):
+        if _run_ingestion_single(uploaded_file, collection, progress_bar, status_text, idx, total_files, force):
             success_count += 1
     
     # Final summary
@@ -121,10 +134,18 @@ def render() -> None:
 
     if uploaded_files:
         st.caption(f"已选择 {len(uploaded_files)} 个文件")
-        if st.button("🚀 Start Ingestion", key="btn_ingest"):
+        
+        # Add Force reprocess option
+        col_btn, col_force = st.columns([2, 1])
+        with col_btn:
+            force_mode = st.checkbox("♻️ Force re-process (重新处理已上传的文件)", value=False, key="force_mode")
+        with col_force:
+            start_ingestion = st.button("🚀 Start Ingestion", key="btn_ingest", type="primary")
+        
+        if start_ingestion:
             progress_bar = st.progress(0, text="Preparing…")
             status_text = st.empty()
-            _run_ingestion(uploaded_files, collection.strip() or "default", progress_bar, status_text)
+            _run_ingestion(uploaded_files, collection.strip() or "default", progress_bar, status_text, force=force_mode)
 
     st.divider()
 

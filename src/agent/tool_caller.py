@@ -13,6 +13,14 @@ from enum import Enum
 from src.core.settings import Settings
 
 
+def _filename_from_path(path: str) -> str:
+    """Extract a human-readable filename from a full path, or return empty."""
+    if not path:
+        return ""
+    import os
+    return os.path.basename(path)
+
+
 class ToolName(Enum):
     """Available tool names."""
     QUERY_KNOWLEDGE_HUB = "query_knowledge_hub"
@@ -121,7 +129,10 @@ class QueryKnowledgeHubTool(BaseTool):
         )
     
     def execute(self, query: str, top_k: int = 5, collection: Optional[str] = None, **kwargs) -> ToolResult:
-        """Execute knowledge base query."""
+        """Execute knowledge base query using parallel hybrid search.
+        
+        Returns detailed statistics about the parallel retrieval process.
+        """
         try:
             from src.core.trace import TraceContext
             
@@ -131,16 +142,37 @@ class QueryKnowledgeHubTool(BaseTool):
                 top_k=top_k,
                 filters=None,
                 trace=trace,
+                return_details=True,  # Get detailed hybrid search result
             )
+            
+            # Handle both HybridSearchResult and List[RetrievalResult]
+            if hasattr(result, 'results'):
+                # HybridSearchResult with detailed info
+                search_results = result.results
+                dense_results = result.dense_results or []
+                sparse_results = result.sparse_results or []
+            else:
+                # Plain list of results
+                search_results = result
+                dense_results = []
+                sparse_results = []
             
             # Format results
             formatted_results = []
-            for doc in result.results if hasattr(result, 'results') else result:
+            for doc in search_results:
+                meta = doc.metadata or {}
+                source = (
+                    meta.get("source")
+                    or meta.get("title")
+                    or meta.get("source_ref")
+                    or _filename_from_path(meta.get("source_path", ""))
+                    or "unknown"
+                )
                 formatted_results.append({
                     "content": doc.text[:500] + "..." if len(doc.text) > 500 else doc.text,
                     "score": doc.score,
-                    "source": doc.metadata.get("source", "unknown") if doc.metadata else "unknown",
-                    "chunk_index": doc.metadata.get("chunk_index", -1) if doc.metadata else -1,
+                    "source": source,
+                    "chunk_index": meta.get("chunk_index", -1),
                 })
             
             return ToolResult(
@@ -149,6 +181,11 @@ class QueryKnowledgeHubTool(BaseTool):
                     "query": query,
                     "results": formatted_results,
                     "total_results": len(formatted_results),
+                    # Parallel retrieval statistics
+                    "dense_count": len(dense_results),
+                    "sparse_count": len(sparse_results),
+                    "fusion_method": "RRF",
+                    "parallel_execution": True,
                 }
             )
         except Exception as e:
