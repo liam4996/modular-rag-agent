@@ -123,13 +123,14 @@ class MultiAgentRAG:
         # Web → Eval
         workflow.add_edge("web", "eval")
         
-        # Eval → Generate 或 Refine
+        # Eval → Generate / Refine / Web（自动升级联网）
         workflow.add_conditional_edges(
             "eval",
-            self._should_refine,
+            self._eval_next_step,
             {
                 "generate": "generate",
                 "refine": "refine",
+                "web": "web",
             }
         )
         
@@ -239,6 +240,9 @@ class MultiAgentRAG:
             local_results=local_results
         )
         
+        # 标记联网搜索已执行（防止重复升级）
+        state.blackboard["web_search_attempted"] = True
+        
         # 写入黑板（Eval Agent 可以看到！）
         state.add_to_blackboard("web_results", web_results, "web")
         
@@ -249,7 +253,7 @@ class MultiAgentRAG:
         state.add_execution_trace({
             "agent": "web",
             "action": "web_search",
-            "query": refined_query,
+            "query": state.user_input,
             "result_count": len(web_results),
             "used_local_context": local_results is not None,
         })
@@ -444,34 +448,43 @@ class MultiAgentRAG:
         intent = state.intent
         return "yes" if intent == "hybrid_search" else "no"
     
-    def _should_refine(self, state: AgentState) -> Literal["generate", "refine"]:
+    def _eval_next_step(self, state: AgentState) -> Literal["generate", "refine", "web"]:
         """
-        判断是否需要优化查询
+        Eval 之后的三路决策：
         
-        决策逻辑：
-        1. 如果已经触发兜底 → Generate（兜底回复）
-        2. 如果 Eval 建议兜底 → Generate（兜底回复）
-        3. 如果 Eval 认为需要优化 → Refine
-        4. 否则 → Generate（正常回复）
+        1. 质量足够          → generate（正常生成）
+        2. 质量不够，还能重试  → refine（优化 query 再搜）
+        3. 重试耗尽但还没试过联网 → web（自动升级联网搜索）
+        4. 联网也试过了 / 已触发兜底 → generate（兜底生成）
         """
-        # 已经触发兜底
-        if state.fallback_triggered:
-            return "generate"
-        
-        # 读取评估结果
+        web_attempted = state.blackboard.get("web_search_attempted", False)
         evaluation = state.evaluation
         need_refinement = evaluation.get("need_refinement", False)
         fallback_suggested = evaluation.get("fallback_suggested", False)
-        
-        # Eval 建议兜底
-        if fallback_suggested:
+        confidence = evaluation.get("confidence", 0.5)
+
+        # 已经触发兜底且联网也试过了 → 直接生成
+        if state.fallback_triggered and web_attempted:
             return "generate"
-        
-        # Eval 认为需要优化
-        if need_refinement:
+
+        # 重试耗尽或 Eval 建议放弃 → 看看联网能不能救
+        if state.fallback_triggered or fallback_suggested:
+            if not web_attempted and state.intent != "web_search":
+                state.add_execution_trace({
+                    "agent": "eval",
+                    "action": "escalate_to_web",
+                    "reason": "local search exhausted, auto-escalating to web",
+                    "retry_count": state.retry_count,
+                    "confidence": confidence,
+                })
+                state.blackboard["web_search_attempted"] = True
+                return "web"
+            return "generate"
+
+        # Eval 认为需要优化且还有重试次数
+        if need_refinement and state.retry_count < state.max_retries:
             return "refine"
-        
-        # 正常生成
+
         return "generate"
     
     # ========== 生成逻辑 ==========
