@@ -1,24 +1,24 @@
 """Multi-Agent Chat page – Interactive chat with the RAG Agent.
 
 Layout:
-1. Chat interface with message history
-2. Configuration options (routing mode, retrieval settings)
+1. Sidebar: config, file upload with auto-ingest, system status
+2. Chat interface with message history
 3. Real-time agent responses with citations
 4. Execution trace visualization
-5. Metrics display
 """
 
 from __future__ import annotations
 
 import logging
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
-# Import multi-agent system
 from src.agent.multi_agent import (
     AgentState,
     MultiAgentRAG,
@@ -28,37 +28,50 @@ from src.agent.multi_agent import (
 
 logger = logging.getLogger(__name__)
 
-# Project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
+# Supported file types (matches ingestion pipeline)
+_SUPPORTED_TYPES = ["pdf", "txt", "md", "docx"]
+_FILE_ICONS = {
+    ".pdf": "\U0001F4D1",   # 📑
+    ".txt": "\U0001F4C4",   # 📄
+    ".md": "\U0001F4DD",    # 📝
+    ".docx": "\U0001F4C3",  # 📃
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Session State
+# ═══════════════════════════════════════════════════════════════
 
 def initialize_session_state() -> None:
-    """Initialize chat session state."""
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    
     if "agent_state" not in st.session_state:
         st.session_state.agent_state = None
-    
     if "agent" not in st.session_state:
         st.session_state.agent = None
-    
     if "execution_traces" not in st.session_state:
         st.session_state.execution_traces = []
+    # Track uploaded & ingested files: {filename: {status, collection, chunk_count, ...}}
+    if "uploaded_files_info" not in st.session_state:
+        st.session_state.uploaded_files_info = {}
+    # Session-level collection name (so uploads go to one place)
+    if "session_collection" not in st.session_state:
+        st.session_state.session_collection = "default"
 
 
-def get_agent() -> MultiAgentRAG:
-    """Get or create agent instance."""
+# ═══════════════════════════════════════════════════════════════
+# Agent
+# ═══════════════════════════════════════════════════════════════
+
+def get_agent() -> Optional[MultiAgentRAG]:
     if st.session_state.agent is None:
         try:
-            # 加载配置
             from src.core.settings import load_settings
-            
-            settings = load_settings()
-            
-            # 初始化 LLM
             from langchain_openai import ChatOpenAI
-            
+
+            settings = load_settings()
             llm = ChatOpenAI(
                 model=settings.llm.model,
                 temperature=settings.llm.temperature,
@@ -66,16 +79,10 @@ def get_agent() -> MultiAgentRAG:
                 api_key=settings.llm.api_key,
                 base_url=settings.llm.base_url if settings.llm.base_url else None,
             )
-            
-            # 初始化 MultiAgentRAG
             st.session_state.agent = MultiAgentRAG(
-                llm=llm,
-                settings=settings,
-                enable_logging=True
+                llm=llm, settings=settings, enable_logging=True
             )
-            
             logger.info("Multi-Agent RAG initialized")
-            
         except Exception as e:
             logger.error(f"Failed to initialize agent: {e}")
             st.error(f"初始化 Agent 失败：{e}")
@@ -86,11 +93,6 @@ def get_agent() -> MultiAgentRAG:
 
 
 def _build_conversation_history() -> List[Dict[str, str]]:
-    """Extract recent conversation turns for the agent's memory.
-
-    Keeps the most recent ``max_turns`` user/assistant pairs so the
-    context window stays manageable.
-    """
     max_turns = 10
     history: List[Dict[str, str]] = []
     for msg in st.session_state.get("chat_history", []):
@@ -98,224 +100,195 @@ def _build_conversation_history() -> List[Dict[str, str]]:
         content = msg.get("content", "")
         if role in ("user", "assistant") and content:
             history.append({"role": role, "content": content[:500]})
-    return history[-max_turns * 2:]
+    return history[-max_turns * 2 :]
 
+
+# ═══════════════════════════════════════════════════════════════
+# File Ingestion (inline, for chat uploads)
+# ═══════════════════════════════════════════════════════════════
+
+def _ingest_uploaded_file(
+    uploaded_file, collection: str, status_placeholder
+) -> bool:
+    """Ingest a single uploaded file into the vector store."""
+    from src.core.settings import load_settings
+    from src.core.trace import TraceContext
+    from src.ingestion.pipeline import IngestionPipeline
+
+    settings = load_settings()
+    suffix = Path(uploaded_file.name).suffix
+    with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        tmp_path = tmp.name
+
+    _STAGE_LABELS = {
+        "integrity": "🔍 校验文件…",
+        "load": "📄 解析文档…",
+        "split": "✂️ 切分段落…",
+        "transform": "🔄 向量化处理…",
+        "embed": "🔢 生成嵌入…",
+        "upsert": "💾 存入向量库…",
+    }
+
+    progress_bar = status_placeholder.progress(0, text="准备中…")
+
+    def on_progress(stage: str, current: int, total: int) -> None:
+        frac = max(0.0, min((current - 1) / total, 1.0))
+        label = _STAGE_LABELS.get(stage, stage)
+        progress_bar.progress(frac, text=f"[{current}/{total}] {label}")
+
+    trace = TraceContext(trace_type="ingestion")
+    trace.metadata["source_path"] = uploaded_file.name
+    trace.metadata["collection"] = collection
+    trace.metadata["source"] = "chat_upload"
+
+    try:
+        pipeline = IngestionPipeline(settings, collection=collection, force=False)
+        result = pipeline.run(file_path=tmp_path, trace=trace, on_progress=on_progress)
+
+        if result.success and result.chunk_count > 0:
+            progress_bar.progress(1.0, text="✅ 导入完成!")
+            st.session_state.uploaded_files_info[uploaded_file.name] = {
+                "status": "success",
+                "chunks": result.chunk_count,
+                "collection": collection,
+                "doc_id": result.doc_id,
+                "time": datetime.now().strftime("%H:%M:%S"),
+            }
+            return True
+        elif result.success and result.chunk_count == 0:
+            progress_bar.progress(1.0, text="⏭️ 文件已存在，跳过")
+            st.session_state.uploaded_files_info[uploaded_file.name] = {
+                "status": "skipped",
+                "chunks": 0,
+                "collection": collection,
+                "time": datetime.now().strftime("%H:%M:%S"),
+            }
+            return True
+        else:
+            progress_bar.progress(0.0, text=f"❌ 失败: {result.error}")
+            st.session_state.uploaded_files_info[uploaded_file.name] = {
+                "status": "failed",
+                "error": str(result.error),
+                "time": datetime.now().strftime("%H:%M:%S"),
+            }
+            return False
+    except Exception as e:
+        progress_bar.progress(0.0, text=f"❌ 异常: {e}")
+        st.session_state.uploaded_files_info[uploaded_file.name] = {
+            "status": "failed",
+            "error": str(e),
+            "time": datetime.now().strftime("%H:%M:%S"),
+        }
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════
+# Query Processing
+# ═══════════════════════════════════════════════════════════════
 
 def process_query(query: str, config: Dict[str, Any]) -> Dict[str, Any]:
-    """Process user query through the agent with conversation memory."""
     agent = get_agent()
     if not agent:
-        return {
-            "success": False,
-            "error": "Agent not initialized",
-        }
-    
+        return {"success": False, "error": "Agent not initialized"}
+
     try:
         start_time = time.time()
-        
         conversation_history = _build_conversation_history()
         final_state = agent.run(
-            user_input=query,
-            conversation_history=conversation_history,
+            user_input=query, conversation_history=conversation_history
         )
-        
-        # LangGraph returns dict representation of AgentState
+
         if isinstance(final_state, dict):
-            answer = final_state.get('final_answer', '')
-            bb = final_state.get('blackboard', {})
-            local_results = bb.get('local_results', [])
-            web_results = bb.get('web_results', [])
-            citations = bb.get('citations', [])
-            evaluation = bb.get('evaluation', {})
-            execution_trace = final_state.get('execution_trace', [])
+            answer = final_state.get("final_answer", "")
+            bb = final_state.get("blackboard", {})
+            local_results = bb.get("local_results", [])
+            web_results = bb.get("web_results", [])
+            citations = bb.get("citations", [])
+            evaluation = bb.get("evaluation", {})
+            execution_trace = final_state.get("execution_trace", [])
         else:
-            # It's an AgentState object
             answer = final_state.final_answer
             local_results = final_state.local_results
             web_results = final_state.web_results
-            citations = final_state.blackboard.get('citations', [])
+            citations = final_state.blackboard.get("citations", [])
             evaluation = final_state.evaluation
             execution_trace = final_state.execution_trace
-        
-        # Record timing
+
         elapsed = time.time() - start_time
-        
-        # Build metrics
         metrics = {
             "retrieval_count": len(local_results) + len(web_results),
             "citation_count": len(citations) if citations else 0,
             "confidence": evaluation.get("confidence", 0) if evaluation else 0,
             "total_time": elapsed,
         }
-        
-        # Build response
-        response = {
+
+        return {
             "success": bool(answer),
-            "answer": answer if answer else "抱歉，我暂时无法回答这个问题。",
-            "citations": citations if citations else [],
+            "answer": answer or "抱歉，我暂时无法回答这个问题。",
+            "citations": citations or [],
             "execution_trace": execution_trace,
             "metrics": metrics,
             "state": final_state,
         }
-        
-        return response
-        
     except Exception as e:
         logger.exception(f"Error processing query: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-        }
+        return {"success": False, "error": str(e)}
 
 
-def simulate_agent_workflow(state: AgentState, agent: MultiAgentRAG) -> Dict[str, Any]:
-    """
-    Simulate the agent workflow for demonstration.
-    
-    This is a placeholder that will be replaced with actual graph execution.
-    """
-    # Simulate Router Agent
-    state.add_execution_trace({
-        "agent": "RouterAgent",
-        "action": "classify_intent",
-        "timestamp": time.time(),
-        "data": {
-            "intent": "local_search",
-            "confidence": 0.95,
-        }
-    })
-    
-    # Simulate Search Agent
-    mock_results = [
-        {
-            "content": f"这是关于「{state.user_input}」的检索结果 1",
-            "source": "文档 A",
-            "score": 0.95,
-        },
-        {
-            "content": f"这是关于「{state.user_input}」的检索结果 2",
-            "source": "文档 B",
-            "score": 0.88,
-        },
-    ]
-    state.add_to_blackboard("local_results", mock_results, "SearchAgent")
-    
-    state.add_execution_trace({
-        "agent": "SearchAgent",
-        "action": "retrieve",
-        "timestamp": time.time(),
-        "data": {
-            "results_count": len(mock_results),
-        }
-    })
-    
-    # Simulate Eval Agent
-    evaluation = {
-        "relevance": 0.90,
-        "confidence": 0.85,
-    }
-    state.add_to_blackboard("evaluation", evaluation, "EvalAgent")
-    
-    state.add_execution_trace({
-        "agent": "EvalAgent",
-        "action": "evaluate",
-        "timestamp": time.time(),
-        "data": evaluation
-    })
-    
-    # Create citations
-    citation_manager = CitationManager()
-    from src.agent.multi_agent.citation import CitationType
-    citations = [
-        Citation(
-            type=CitationType.LOCAL,
-            source="文档 A",
-            content=mock_results[0]["content"],
-            confidence=0.95,
-        ),
-        Citation(
-            type=CitationType.LOCAL,
-            source="文档 B",
-            content=mock_results[1]["content"],
-            confidence=0.88,
-        ),
-    ]
-    citation_manager.add_citations(citations)
-    
-    # Generate response
-    answer = (
-        f"根据检索到的信息，关于「{state.user_input}」：\n\n"
-        f"1. {mock_results[0]['content']} [Local: {mock_results[0]['source']}]\n"
-        f"2. {mock_results[1]['content']} [Local: {mock_results[1]['source']}]\n\n"
-        f"以上信息基于本地知识库。"
-    )
-    
-    state.final_answer = answer
-    
-    state.add_execution_trace({
-        "agent": "GenerateAgent",
-        "action": "generate_answer",
-        "timestamp": time.time(),
-        "data": {
-            "answer_length": len(answer),
-            "citations_count": len(citations),
-        }
-    })
-    
-    return {
-        "success": True,
-        "answer": answer,
-        "citations": citations,
-        "execution_trace": state.execution_trace,
-        "metrics": {
-            "retrieval_count": len(mock_results),
-            "citation_count": len(citations),
-            "confidence": evaluation["confidence"],
-        },
-        "state": state,
-    }
-
+# ═══════════════════════════════════════════════════════════════
+# Display Helpers
+# ═══════════════════════════════════════════════════════════════
 
 def display_chat_message(message: Dict[str, Any]) -> None:
-    """Display a chat message."""
     role = message["role"]
     content = message["content"]
-    
+
     if role == "user":
-        st.chat_message("user").markdown(content)
+        with st.chat_message("user"):
+            # Show attached file names if present
+            if message.get("attached_files"):
+                file_tags = " ".join(
+                    f"`📎 {f}`" for f in message["attached_files"]
+                )
+                st.markdown(f"{file_tags}")
+            st.markdown(content)
     elif role == "assistant":
         with st.chat_message("assistant"):
             st.markdown(content)
-            
-            # Show citations if available
+
             if "citations" in message and message["citations"]:
                 with st.expander("📚 查看引用来源", expanded=False):
                     for idx, citation in enumerate(message["citations"], 1):
-                        if isinstance(citation, dict):
-                            c = Citation.from_dict(citation)
-                        else:
-                            c = citation
+                        c = (
+                            Citation.from_dict(citation)
+                            if isinstance(citation, dict)
+                            else citation
+                        )
                         st.markdown(f"**{idx}.** {c.format_citation()}")
                         with st.expander(f"查看内容 #{idx}", expanded=False):
-                            st.markdown(c.content[:300] + "..." if len(c.content) > 300 else c.content)
-            
-            # Show metrics if available
+                            st.markdown(
+                                c.content[:300] + "..."
+                                if len(c.content) > 300
+                                else c.content
+                            )
+
             if "metrics" in message and message["metrics"]:
                 with st.expander("📊 执行指标", expanded=False):
                     metrics = message["metrics"]
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric("检索文档数", metrics.get("retrieval_count", 0))
                     with col2:
                         st.metric("引用数量", metrics.get("citation_count", 0))
                     with col3:
                         st.metric("置信度", f"{metrics.get('confidence', 0):.2f}")
+                    with col4:
+                        st.metric("耗时", f"{metrics.get('total_time', 0):.1f}s")
 
 
 def display_execution_trace(trace: List[Dict[str, Any]]) -> None:
-    """Display execution trace visualization."""
     st.subheader("🔍 执行轨迹")
-    
     agent_icons = {
         "router": "🎯", "RouterAgent": "🎯",
         "search": "🔍", "SearchAgent": "🔍",
@@ -325,15 +298,11 @@ def display_execution_trace(trace: List[Dict[str, Any]]) -> None:
         "generate": "✍️", "GenerateAgent": "✍️",
         "parallel_controller": "⚡",
     }
-    
     for idx, step in enumerate(trace, 1):
         agent = step.get("agent", "Unknown")
         action = step.get("action", "unknown")
         icon = agent_icons.get(agent, "🤖")
-        
-        # Show all fields except agent/action as detail data
         detail = {k: v for k, v in step.items() if k not in ("agent", "action")}
-        
         with st.expander(f"{icon} **{agent}** → {action}", expanded=False):
             if detail:
                 st.json(detail)
@@ -341,110 +310,147 @@ def display_execution_trace(trace: List[Dict[str, Any]]) -> None:
                 st.caption("无详细数据")
 
 
+# ═══════════════════════════════════════════════════════════════
+# Main Render
+# ═══════════════════════════════════════════════════════════════
+
+def _inject_css() -> None:
+    st.markdown("""
+    <style>
+    .block-container { padding-bottom: 70px !important; }
+    .file-chips {
+        display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0;
+    }
+    .file-chip {
+        background: rgba(128,128,128,0.12);
+        border-radius: 12px; padding: 2px 10px;
+        font-size: 0.8rem; white-space: nowrap;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 def render() -> None:
-    """Render the Multi-Agent Chat page."""
     st.header("🤖 多智能体 RAG 对话")
-    st.markdown("与 RAG Agent 进行交互式对话")
-    
-    # Initialize session state
+
     initialize_session_state()
-    
-    # ── Configuration Sidebar ────────────────────────────────────
+    _inject_css()
+
+    # ── Sidebar ────────────────────────────────────────────────
     with st.sidebar:
         st.subheader("⚙️ 配置")
-        
-        # Routing mode
         routing_mode = st.selectbox(
             "路由模式",
             options=["auto", "local_search", "web_search", "hybrid_search"],
             index=0,
-            help="选择搜索模式",
+            help="auto = Router Agent 自动判断",
         )
-        
-        # Top-K
-        top_k = st.slider(
-            "检索数量",
-            min_value=1,
-            max_value=20,
-            value=5,
-            help="返回的检索结果数量",
-        )
-        
-        # Clear chat button
+        top_k = st.slider("检索数量", 1, 20, 5)
         if st.button("🗑️ 清空对话", use_container_width=True):
             st.session_state.chat_history = []
             st.session_state.execution_traces = []
+            st.session_state.uploaded_files_info = {}
             st.rerun()
-        
+
         st.divider()
-        
-        # System status
-        st.subheader("📊 系统状态")
+        st.subheader("📊 状态")
         agent = get_agent()
-        if agent:
-            st.success("✅ Agent 已初始化")
-        else:
-            st.error("❌ Agent 未初始化")
-        
-        st.metric("对话轮数", len(st.session_state.chat_history))
-        st.metric("执行轨迹", len(st.session_state.execution_traces))
-    
-    # ── Chat Interface ───────────────────────────────────────────
-    
-    # Display chat history
+        st.success("✅ Agent 就绪") if agent else st.error("❌ Agent 未初始化")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("对话轮数", len(st.session_state.chat_history) // 2)
+        with c2:
+            n_files = sum(
+                1 for v in st.session_state.uploaded_files_info.values()
+                if v.get("status") in ("success", "skipped")
+            )
+            st.metric("已导入文件", n_files)
+
+    # ── Chat history ───────────────────────────────────────────
     for message in st.session_state.chat_history:
         display_chat_message(message)
-    
-    # Chat input
-    if prompt := st.chat_input("输入您的问题..."):
-        # Display user message
+
+    # ── Uploaded file chips ─────────────────────────────────────
+    chips = []
+    for fname, info in st.session_state.uploaded_files_info.items():
+        s = info.get("status", "")
+        suffix = Path(fname).suffix.lower()
+        icon = _FILE_ICONS.get(suffix, "📄")
+        if s == "success":
+            chips.append(f"{icon} {fname} ({info.get('chunks', 0)}段)")
+        elif s == "skipped":
+            chips.append(f"{icon} {fname} (已存在)")
+        elif s == "failed":
+            chips.append(f"❌ {fname}")
+    if chips:
+        st.caption(" · ".join(chips))
+
+    # ── Chat input (native upload icon at the left) ─────────────
+    chat_value = st.chat_input(
+        "输入问题…",
+        accept_file="multiple",
+        file_type=_SUPPORTED_TYPES,
+    )
+
+    if chat_value:
+        # chat_input returns either str or ChatInputValue
+        if isinstance(chat_value, str):
+            prompt = chat_value
+            input_files = []
+        else:
+            prompt = getattr(chat_value, "text", "") or getattr(chat_value, "message", "")
+            input_files = list(getattr(chat_value, "files", []) or [])
+
+        # Auto-ingest files attached in this turn
+        if input_files:
+            with st.spinner("正在导入附件..."):
+                new_files = [
+                    f for f in input_files
+                    if f.name not in st.session_state.uploaded_files_info
+                ]
+                for uf in new_files:
+                    status_area = st.container()
+                    _ingest_uploaded_file(
+                        uf,
+                        st.session_state.session_collection,
+                        status_area,
+                    )
+
+        if not (prompt and prompt.strip()):
+            st.rerun()
+
+        active_files = [
+            fname
+            for fname, info in st.session_state.uploaded_files_info.items()
+            if info.get("status") in ("success", "skipped")
+        ]
+
         st.chat_message("user").markdown(prompt)
-        st.session_state.chat_history.append({
-            "role": "user",
-            "content": prompt,
-        })
-        
-        # Process query
-        config = {
-            "routing_mode": routing_mode,
-            "top_k": top_k,
-        }
-        
+        user_msg: Dict[str, Any] = {"role": "user", "content": prompt}
+        if active_files:
+            user_msg["attached_files"] = active_files
+        st.session_state.chat_history.append(user_msg)
+
+        config = {"routing_mode": routing_mode, "top_k": top_k}
+
         with st.chat_message("assistant"):
             with st.spinner("正在思考..."):
                 response = process_query(prompt, config)
-        
+
         if response["success"]:
-            # Display assistant response
-            answer = response["answer"]
-            citations = response["citations"]
-            metrics = response["metrics"]
-            execution_trace = response["execution_trace"]
-            
-            # Store in history
             assistant_message = {
                 "role": "assistant",
-                "content": answer,
-                "citations": citations,
-                "metrics": metrics,
+                "content": response["answer"],
+                "citations": response["citations"],
+                "metrics": response["metrics"],
             }
             st.session_state.chat_history.append(assistant_message)
-            
-            # Store execution trace
-            st.session_state.execution_traces.extend(execution_trace)
-            
-            # Display response
+            st.session_state.execution_traces.extend(response["execution_trace"])
             display_chat_message(assistant_message)
-            
-            # Show execution trace
-            if execution_trace:
-                display_execution_trace(execution_trace)
-            
-            # Auto-scroll
+            if response["execution_trace"]:
+                display_execution_trace(response["execution_trace"])
             st.rerun()
-            
         else:
-            # Display error
             error_message = {
                 "role": "assistant",
                 "content": f"❌ 处理失败：{response.get('error', '未知错误')}",
@@ -455,7 +461,6 @@ def render() -> None:
 
 
 def main() -> None:
-    """Main entry point."""
     render()
 
 

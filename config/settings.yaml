@@ -10,8 +10,9 @@ llm:
   deployment_name: ""
   azure_endpoint: ""
   api_version: ""
-  api_key: "${OPENAI_API_KEY}"
-  base_url: "https://api.openai-proxy.org/v1"
+  # 使用环境变量 OPENAI_API_KEY，或在此填写（勿提交到 Git）
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
   temperature: 0.0
   max_tokens: 4096
 
@@ -25,8 +26,8 @@ embedding:
   azure_endpoint: ""
   deployment_name: ""
   api_version: ""
-  api_key: "${OPENAI_API_KEY}"
-  base_url: "https://api.openai-proxy.org/v1"
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
 
 # =============================================================================
 # Vision LLM Configuration (for Image Captioning)
@@ -38,8 +39,8 @@ vision_llm:
   azure_endpoint: ""
   deployment_name: ""
   api_version: ""
-  api_key: "${OPENAI_API_KEY}"
-  base_url: "https://api.openai-proxy.org/v1"
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
   max_image_size: 2048
 
 # =============================================================================
@@ -48,34 +49,69 @@ vision_llm:
 vector_store:
   provider: "chroma"
   persist_directory: "./data/db/chroma"
+  collection_name: "default"
 
 # =============================================================================
-# Document Processing Configuration
+# Retrieval Configuration
 # =============================================================================
-document_processing:
-  chunk_size: 1000
-  chunk_overlap: 200
-  supported_formats:
-    - ".txt"
-    - ".md"
-    - ".pdf"
-    - ".docx"
-    - ".html"
-  ocr_enabled: true
-  image_captioning_enabled: true
-
-# =============================================================================
-# Query Engine Configuration
-# =============================================================================
-query_engine:
+retrieval:
   dense_top_k: 20
   sparse_top_k: 20
   fusion_top_k: 10
-  enable_dense: true
-  enable_sparse: true
-  parallel_retrieval: true
-  metadata_filter_post: true
-  reranker_enabled: false
+  rrf_k: 60
+
+# =============================================================================
+# Reranker Configuration
+# =============================================================================
+rerank:
+  enabled: false
+  provider: "none"
+  model: "none"
+  top_k: 5
+
+# =============================================================================
+# Evaluation Configuration
+# =============================================================================
+evaluation:
+  enabled: false
+  provider: "none"
+  metrics:
+    - "faithfulness"
+    - "relevancy"
+
+# =============================================================================
+# Observability Configuration
+# =============================================================================
+observability:
+  log_level: "INFO"
+  trace_enabled: true
+  trace_file: "./logs/trace.json"
+  structured_logging: true
+
+# =============================================================================
+# Ingestion Configuration
+# =============================================================================
+ingestion:
+  chunk_size: 1000
+  chunk_overlap: 200
+  splitter: "recursive"
+  batch_size: 50
+  chunk_refiner:
+    use_llm: false
+  metadata_enricher:
+    use_llm: false
+
+# =============================================================================
+# Web Search Configuration (Tavily recommended for China)
+# Get free API key: https://app.tavily.com (1000 searches/month free)
+# =============================================================================
+web_search:
+  engine: "tavily"
+  # 使用环境变量 TAVILY_API_KEY，或在此填写（勿提交到 Git）
+  tavily_api_key: ""
+  # google_api_key: ""
+  # google_search_engine_id: ""
+  # bing_api_key: ""
 
 # =============================================================================
 # Agent Configuration
@@ -100,7 +136,7 @@ server:
 # Security Configuration
 # =============================================================================
 security:
-  secret_key: "${SECRET_KEY}"
+  secret_key: "your-secret-key-change-this"
   access_token_expire_minutes: 30
   allowed_hosts:
     - "localhost"

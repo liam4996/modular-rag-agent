@@ -8,6 +8,7 @@
 - 写入结果到 blackboard["web_results"]
 """
 
+import os
 from typing import List, Dict, Any, Optional
 from src.agent.tools.web_search import WebSearchTool, WebSearchResult
 from src.core.settings import Settings
@@ -30,27 +31,25 @@ class WebSearchAgent:
     def __init__(
         self,
         settings: Optional[Settings] = None,
-        search_engine: str = "duckduckgo"
+        search_engine: str = "tavily",
     ):
-        """
-        初始化 Web Search Agent
-        
-        Args:
-            settings: 系统配置
-            search_engine: 搜索引擎类型
-        """
         self.settings = settings or Settings()
-        
-        # 从 settings 获取 API keys（如果配置了）
-        google_api_key = getattr(self.settings, 'google_search_api_key', None)
-        google_search_engine_id = getattr(self.settings, 'google_search_engine_id', None)
-        bing_api_key = getattr(self.settings, 'bing_search_api_key', None)
-        
+
+        ws = getattr(self.settings, "web_search", None)
+        tavily_raw = getattr(ws, "tavily_api_key", None) if ws else None
+        tavily_api_key = tavily_raw or os.environ.get("TAVILY_API_KEY")
+        google_api_key = getattr(ws, "google_api_key", None) if ws else None
+        google_search_engine_id = getattr(ws, "google_search_engine_id", None) if ws else None
+        bing_api_key = getattr(ws, "bing_api_key", None) if ws else None
+
+        engine = (getattr(ws, "engine", None) if ws else None) or search_engine
+
         self.search_tool = WebSearchTool(
-            search_engine=search_engine,
+            search_engine=engine,
+            tavily_api_key=tavily_api_key,
             google_api_key=google_api_key,
             google_search_engine_id=google_search_engine_id,
-            bing_api_key=bing_api_key
+            bing_api_key=bing_api_key,
         )
     
     def search(

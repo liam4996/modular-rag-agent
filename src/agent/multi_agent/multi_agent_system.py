@@ -156,8 +156,8 @@ class MultiAgentRAG:
             context=state.conversation_history
         )
         
-        # 写入黑板（共享！）
-        state.add_to_blackboard("intent", decision.intent, "router")
+        # 写入黑板（共享！）— 统一小写，防止大小写不一致导致路由失败
+        state.add_to_blackboard("intent", decision.intent.lower(), "router")
         state.add_to_blackboard(
             "routing_decision",
             {
@@ -387,39 +387,64 @@ class MultiAgentRAG:
         - 可以读取黑板上的所有数据！
         - 生成带溯源的回答
         - 进行忠实度检查
+        - 当所有检索均失败时，降级为 LLM 通用知识回答
         """
-        # ⭐ 获取所有上下文
         all_context = state.get_all_context()
         
-        # Only fall back when there are truly NO results.
-        # If we have retrieved documents, always attempt LLM generation.
-        has_results = bool(state.local_results or state.web_results)
-        if state.should_fallback and not has_results:
+        has_local = bool(state.local_results)
+        has_web = bool(state.web_results)
+        web_attempted = state.blackboard.get("web_search_attempted", False)
+        eval_confidence = state.blackboard.get("evaluation", {}).get("confidence", 1.0)
+
+        # Determine if local results are all noise (CRAG pre-check)
+        local_all_noise = False
+        if has_local and eval_confidence < 0.3:
+            useful = [
+                r for r in state.local_results
+                if r.get("score", 0) >= self._LOCAL_RELEVANCE_THRESHOLD
+            ]
+            local_all_noise = len(useful) == 0
+
+        intent = (state.intent or "").lower()
+        search_was_attempted = bool(state.retry_count > 0 or web_attempted or state.execution_trace)
+        is_chat_direct = intent == "chat" and not search_was_attempted
+
+        if is_chat_direct:
+            gen_mode = "general_knowledge"
+        elif not has_local and not has_web:
+            if web_attempted:
+                gen_mode = "general_knowledge"
+            else:
+                gen_mode = "fallback"
+        elif local_all_noise and not has_web and web_attempted:
+            gen_mode = "general_knowledge"
+        else:
+            gen_mode = "normal"
+
+        if gen_mode == "fallback":
             state.final_answer = self._generate_fallback_response(state)
             state.add_metric("generation_mode", "fallback")
+        elif gen_mode == "general_knowledge":
+            answer = self._generate_general_knowledge_answer(all_context)
+            state.final_answer = answer
+            state.add_metric("generation_mode", "general_knowledge")
         else:
-            # 正常生成模式（带溯源）
             answer, citations, faithfulness = self._generate_normal_response_with_citations(
                 all_context
             )
             state.final_answer = answer
-            
-            # 写入引用信息
             state.add_to_blackboard("citations", [c.to_dict() for c in citations], "generate")
             state.add_to_blackboard("faithfulness_check", faithfulness.to_dict(), "generate")
-            
-            # 记录指标
             state.add_metric("generation_mode", "normal_with_citations")
             state.add_metric("citation_count", len(citations))
             state.add_metric("faithfulness_score", faithfulness.confidence)
             state.add_metric("hallucination_detected", faithfulness.hallucination_detected)
         
-        # 执行轨迹
         state.add_execution_trace({
             "agent": "generate",
             "action": "generate_final_answer",
             "answer_length": len(state.final_answer),
-            "fallback_triggered": state.should_fallback,
+            "generation_mode": gen_mode,
             "citation_count": len(state.blackboard.get("citations", [])),
             "faithfulness_check": state.blackboard.get("faithfulness_check", {}),
         })
@@ -430,9 +455,8 @@ class MultiAgentRAG:
     
     def _route_by_intent(self, state: AgentState) -> Literal["generate", "search", "web"]:
         """根据意图路由到对应的节点"""
-        intent = state.intent
+        intent = (state.intent or "unknown").lower()
         
-        # 映射意图到节点名称
         intent_to_node = {
             "chat": "generate",
             "local_search": "search",
@@ -445,17 +469,20 @@ class MultiAgentRAG:
     
     def _should_search_web(self, state: AgentState) -> Literal["yes", "no"]:
         """判断是否需要联网搜索"""
-        intent = state.intent
+        intent = (state.intent or "").lower()
         return "yes" if intent == "hybrid_search" else "no"
     
     def _eval_next_step(self, state: AgentState) -> Literal["generate", "refine", "web"]:
         """
-        Eval 之后的三路决策：
+        Eval 之后的三路决策（含自动联网升级）：
         
-        1. 质量足够          → generate（正常生成）
-        2. 质量不够，还能重试  → refine（优化 query 再搜）
-        3. 重试耗尽但还没试过联网 → web（自动升级联网搜索）
-        4. 联网也试过了 / 已触发兜底 → generate（兜底生成）
+        优先级从高到低：
+        1. 已联网且已兜底         → generate（所有手段用尽）
+        2. 兜底/放弃 + 没联网过   → web（自动升级联网）
+        3. 需要优化 + 有重试次数   → refine（改写 query 重搜）
+        4. 重试耗尽 + 没联网过     → web（兜底前最后一搏）
+        5. 置信度低 + 没联网过     → web（Eval 没明确说差，但分数不高）
+        6. 其他                   → generate（正常生成）
         """
         web_attempted = state.blackboard.get("web_search_attempted", False)
         evaluation = state.evaluation
@@ -463,41 +490,101 @@ class MultiAgentRAG:
         fallback_suggested = evaluation.get("fallback_suggested", False)
         confidence = evaluation.get("confidence", 0.5)
 
-        # 已经触发兜底且联网也试过了 → 直接生成
-        if state.fallback_triggered and web_attempted:
+        def _escalate_to_web(reason: str) -> Literal["web"]:
+            state.add_execution_trace({
+                "agent": "eval",
+                "action": "escalate_to_web",
+                "reason": reason,
+                "retry_count": state.retry_count,
+                "confidence": confidence,
+            })
+            state.blackboard["web_search_attempted"] = True
+            return "web"
+
+        # 1. 联网也试过了 → 不再升级，直接生成
+        if web_attempted:
             return "generate"
 
-        # 重试耗尽或 Eval 建议放弃 → 看看联网能不能救
+        # 2. 明确兜底/放弃 → 升级联网
         if state.fallback_triggered or fallback_suggested:
-            if not web_attempted and state.intent != "web_search":
-                state.add_execution_trace({
-                    "agent": "eval",
-                    "action": "escalate_to_web",
-                    "reason": "local search exhausted, auto-escalating to web",
-                    "retry_count": state.retry_count,
-                    "confidence": confidence,
-                })
-                state.blackboard["web_search_attempted"] = True
-                return "web"
-            return "generate"
+            return _escalate_to_web("local search fallback triggered")
 
-        # Eval 认为需要优化且还有重试次数
+        # 3. 需要优化且有重试次数 → refine
         if need_refinement and state.retry_count < state.max_retries:
             return "refine"
 
+        # 4. 重试耗尽但还没联网 → 升级联网（别直接放弃）
+        if need_refinement and state.retry_count >= state.max_retries:
+            return _escalate_to_web("retries exhausted, trying web as last resort")
+
+        # 5. Eval 没明确说差，但置信度偏低 → 联网补充
+        if confidence < 0.5:
+            return _escalate_to_web(f"low confidence ({confidence}), trying web")
+
+        # 6. 质量足够 → 正常生成
         return "generate"
     
     # ========== 生成逻辑 ==========
     
-    _RAG_SYSTEM_PROMPT = (
-        "你是一个专业的知识库问答助手。根据下方提供的检索结果和对话历史回答用户的问题。\n"
-        "要求：\n"
-        "1. 仅基于检索结果中的信息作答，不要编造内容。\n"
-        "2. 用清晰、结构化的中文回答。如果原文是英文，请翻译为中文后作答。\n"
-        "3. 在回答末尾用 [1][2] 等标注引用了哪些检索结果。\n"
-        "4. 如果检索结果不足以回答问题，如实说明。\n"
-        "5. 结合对话历史理解用户意图，例如用户说'它'、'这篇'时，根据上文确定指代对象。\n"
-    )
+    @staticmethod
+    def _get_date_context() -> str:
+        from datetime import datetime
+        now = datetime.now()
+        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        return f"当前时间：{now.strftime('%Y年%m月%d日')} {weekdays[now.weekday()]} {now.strftime('%H:%M')}"
+
+    def _build_rag_system_prompt(self) -> str:
+        return (
+            f"系统信息：{self._get_date_context()}\n\n"
+            "你是一个专业的知识库问答助手。根据下方提供的检索结果和对话历史回答用户的问题。\n"
+            "要求：\n"
+            "1. 仅基于检索结果中的信息作答，不要编造内容。\n"
+            "2. 用清晰、结构化的中文回答。如果原文是英文，请翻译为中文后作答。\n"
+            "3. 在回答末尾用 [1][2] 等标注引用了哪些检索结果。\n"
+            "4. 如果检索结果不足以回答问题，如实说明。\n"
+            "5. 结合对话历史理解用户意图，例如用户说'它'、'这篇'时，根据上文确定指代对象。\n"
+            "6. 信息冲突处理原则：\n"
+            "   - 公司政策、内部规范、组织架构等问题，以 [本地知识库] 的信息为准。\n"
+            "   - 客观事实、行业趋势、最新新闻等问题，以 [互联网信息] 作为补充。\n"
+            "   - 如果两者存在矛盾，请明确标注信息来源并说明差异，让用户自行判断。\n"
+        )
+
+    def _build_general_knowledge_prompt(self) -> str:
+        return (
+            f"系统信息：{self._get_date_context()}\n\n"
+            "你是一个知识渊博的AI助手。\n"
+            "本地知识库和联网搜索均未能找到与用户问题相关的信息。\n"
+            "请根据你自身的知识储备，用清晰、结构化的中文回答用户的问题。\n"
+            "要求：\n"
+            "1. 在回答开头注明：'以下回答基于AI通用知识，非来自知识库检索。'\n"
+            "2. 尽量准确、客观地回答。\n"
+            "3. 如果你不确定，请如实说明。\n"
+            "4. 结合对话历史理解用户意图。\n"
+        )
+
+    # CRAG-inspired relevance threshold: local chunks below this score
+    # are considered noise and filtered out before generation.
+    _LOCAL_RELEVANCE_THRESHOLD = 0.3
+
+    def _filter_local_results(
+        self, local_results: List[Dict], eval_confidence: float
+    ) -> List[Dict]:
+        """CRAG-inspired noise filtering: remove low-relevance local chunks.
+
+        When Eval confidence is low (meaning local results were mostly noise),
+        aggressively filter by score threshold so that only genuinely useful
+        chunks survive into the LLM prompt.  When confidence is high, keep
+        everything — the results are already good.
+        """
+        if eval_confidence >= 0.7 or not local_results:
+            return local_results
+
+        filtered = [
+            r for r in local_results
+            if r.get("score", 0) >= self._LOCAL_RELEVANCE_THRESHOLD
+        ]
+        # Always keep at least 1 result to avoid an empty context
+        return filtered if filtered else local_results[:1]
 
     def _generate_normal_response_with_citations(
         self,
@@ -507,6 +594,10 @@ class MultiAgentRAG:
         local_results = context.get("local_results", [])
         web_results = context.get("web_results", [])
         query = context.get("user_input", "")
+
+        # CRAG: filter noisy local chunks when eval confidence was low
+        eval_confidence = context.get("evaluation", {}).get("confidence", 1.0)
+        local_results = self._filter_local_results(local_results, eval_confidence)
 
         citation_manager = CitationManager()
         citations = CitationManager.create_citations_from_results(
@@ -525,18 +616,18 @@ class MultiAgentRAG:
         for i, result in enumerate(local_results[:5], 1):
             content = result.get("content", "")
             source = result.get("source", "unknown")
-            context_parts.append(f"[{i}] (来源: {source})\n{content}")
+            context_parts.append(f"[{i}] (本地知识库: {source})\n{content}")
         offset = len(local_results[:5])
         for i, result in enumerate(web_results[:3], 1):
             title = result.get("title", "")
             snippet = result.get("snippet", result.get("content", ""))
             url = result.get("url", "")
-            context_parts.append(f"[{offset + i}] (网络来源: {title}, {url})\n{snippet}")
+            context_parts.append(f"[{offset + i}] (互联网: {title}, {url})\n{snippet}")
 
         retrieval_context = "\n\n".join(context_parts)
 
         from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-        messages: list = [SystemMessage(content=self._RAG_SYSTEM_PROMPT)]
+        messages: list = [SystemMessage(content=self._build_rag_system_prompt())]
 
         # Inject conversation history so LLM understands multi-turn context
         conv_history = context.get("conversation_history", [])
@@ -585,6 +676,30 @@ class MultiAgentRAG:
         answer, _, _ = self._generate_normal_response_with_citations(context)
         return answer
     
+    def _generate_general_knowledge_answer(self, context: Dict) -> str:
+        """当所有检索（本地+联网）均失败时，用 LLM 通用知识直接回答。"""
+        query = context.get("user_input", "")
+
+        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+        messages: list = [SystemMessage(content=self._build_general_knowledge_prompt())]
+
+        conv_history = context.get("conversation_history", [])
+        for turn in conv_history[-6:]:
+            role = turn.get("role", "")
+            text = turn.get("content", "")
+            if role == "user":
+                messages.append(HumanMessage(content=text))
+            elif role == "assistant":
+                messages.append(AIMessage(content=text))
+
+        messages.append(HumanMessage(content=query))
+
+        try:
+            response = self.llm.invoke(messages)
+            return response.content if hasattr(response, "content") else str(response)
+        except Exception as exc:
+            return f"抱歉，检索和联网搜索均未找到结果，LLM 直接回答也遇到了问题：{exc}"
+
     def _generate_fallback_response(self, state: AgentState) -> str:
         """
         生成兜底回复

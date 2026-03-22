@@ -173,8 +173,17 @@ class IngestionSettings:
     chunk_overlap: int
     splitter: str
     batch_size: int
-    chunk_refiner: Optional[Dict[str, Any]] = None  # 动态配置
-    metadata_enricher: Optional[Dict[str, Any]] = None  # 动态配置
+    chunk_refiner: Optional[Dict[str, Any]] = None
+    metadata_enricher: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class WebSearchSettings:
+    engine: str = "tavily"
+    tavily_api_key: Optional[str] = None
+    google_api_key: Optional[str] = None
+    google_search_engine_id: Optional[str] = None
+    bing_api_key: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +197,7 @@ class Settings:
     observability: ObservabilitySettings
     ingestion: Optional[IngestionSettings] = None
     vision_llm: Optional[VisionLLMSettings] = None
+    web_search: Optional[WebSearchSettings] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Settings":
@@ -227,6 +237,17 @@ class Settings:
                 azure_endpoint=vision_llm.get("azure_endpoint"),
                 deployment_name=vision_llm.get("deployment_name"),
                 base_url=vision_llm.get("base_url"),
+            )
+
+        web_search_settings = None
+        if "web_search" in data:
+            ws = _require_mapping(data, "web_search", "settings")
+            web_search_settings = WebSearchSettings(
+                engine=ws.get("engine", "tavily"),
+                tavily_api_key=ws.get("tavily_api_key"),
+                google_api_key=ws.get("google_api_key"),
+                google_search_engine_id=ws.get("google_search_engine_id"),
+                bing_api_key=ws.get("bing_api_key"),
             )
 
         settings = cls(
@@ -281,6 +302,7 @@ class Settings:
             ),
             ingestion=ingestion_settings,
             vision_llm=vision_llm_settings,
+            web_search=web_search_settings,
         )
 
         return settings

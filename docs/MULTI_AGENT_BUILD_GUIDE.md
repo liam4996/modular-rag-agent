@@ -57,7 +57,7 @@
 |------|------|
 | **Blackboard Pattern** | 所有 Agent 共享一个 `AgentState`，通过 `blackboard` 字典读写数据 |
 | **LangGraph StateGraph** | 用有向图定义 Agent 间的流转关系，支持条件分支和循环 |
-| **重试-兜底机制** | Eval → Refine → Search 构成闭环，最多重试 2 次后兜底 |
+| **渐进式升级** | Eval → Refine → Search 闭环重试，耗尽后自动升级联网（CRAG 思想） |
 | **溯源 + 忠实度** | Citation 模块追踪每条回答的来源，N-gram 检查是否存在幻觉 |
 
 **文件结构：**
@@ -612,18 +612,48 @@ def _route_by_intent(self, state) -> Literal["generate", "search", "web"]:
     }
     return intent_to_node.get(state.intent, "search")
 
-def _should_refine(self, state) -> Literal["generate", "refine"]:
-    if state.fallback_triggered:
-        return "generate"  # 已触发兜底，不再重试
+def _eval_next_step(self, state) -> Literal["generate", "refine", "web"]:
+    web_attempted = state.blackboard.get("web_search_attempted", False)
     evaluation = state.evaluation
-    if evaluation.get("fallback_suggested"):
+    fallback_suggested = evaluation.get("fallback_suggested", False)
+
+    # 重试耗尽或 Eval 建议放弃 → 看联网能不能救
+    if state.fallback_triggered or fallback_suggested:
+        if not web_attempted and state.intent != "web_search":
+            state.blackboard["web_search_attempted"] = True
+            return "web"    # 自动升级联网！
         return "generate"
-    if evaluation.get("need_refinement"):
+
+    # 质量不够但还有重试次数
+    if evaluation.get("need_refinement") and state.retry_count < state.max_retries:
         return "refine"
     return "generate"
 ```
 
-### 9.6 公共 API
+### 9.6 CRAG 噪音过滤 + 信息冲突处理
+
+**优化 1：本地噪音过滤（CRAG 思想）**
+
+当本地 RAG 效果不好触发了联网搜索，说明 `local_results` 里大概率混杂了噪音。与其无脑把前 5 条全塞进 LLM prompt，不如按相关性分数过滤：
+
+```python
+def _filter_local_results(self, local_results, eval_confidence):
+    if eval_confidence >= 0.7 or not local_results:
+        return local_results  # Eval 评分高，本地结果质量好，保留全部
+    # 过滤低分 chunk，只保留 score >= 0.3 的
+    filtered = [r for r in local_results if r.get("score", 0) >= 0.3]
+    return filtered if filtered else local_results[:1]  # 至少保留 1 条
+```
+
+**优化 2：信息冲突处理原则**
+
+当 local + web 两路结果同时存在时，可能出现矛盾（比如公司报销标准 vs 网上的通用标准）。在 System Prompt 中加入冲突处理规则：
+
+> - 公司政策、内部规范、组织架构 → 以本地知识库为准
+> - 客观事实、行业趋势、最新新闻 → 以互联网信息为补充
+> - 如果存在矛盾 → 标注信息来源并说明差异
+
+### 9.7 公共 API
 
 ```python
 def run(self, user_input, conversation_history=None) -> AgentState:
@@ -789,3 +819,11 @@ else:
 ### Q6: 重试机制会不会导致延迟太高？
 
 > 最多重试 2 次，每次重试增加一轮 Refine + Search + Eval。实际测试中，大部分查询在第一轮就通过评估，重试率约 10-20%。对于确实需要重试的查询（比如原始 query 太模糊），2 轮优化后质量提升明显，用户体验收益大于延迟成本。可以通过 `max_retries` 配置来平衡。
+
+### Q7: 本地检索多次失败后怎么办？了解 CRAG 吗？
+
+> 我们实现了类似 CRAG（Corrective RAG）的渐进式升级策略。当本地检索重试耗尽仍无法满足质量要求时，系统不会直接放弃，而是自动升级到联网搜索。同时在生成阶段会做噪音过滤——既然本地 RAG 效果不好，说明 local_results 里大概率有噪音，我们会根据 Eval 的 confidence 和 chunk 的相关性分数过滤掉低质量的本地结果，只保留勉强相关的部分与 web 结果融合。此外，System Prompt 中还设定了信息冲突处理原则：公司内部信息以本地知识库为准，客观事实和最新动态以互联网为补充，矛盾时标注来源让用户判断。
+
+### Q8: 本地知识库和联网搜索的信息冲突怎么处理？
+
+> 在 Generate Agent 的 System Prompt 中内置了冲突处理原则：(1) 公司政策、内部规范等以本地知识库为权威来源；(2) 客观事实、行业趋势以互联网信息补充；(3) 存在矛盾时明确标注两方来源和差异，不替用户做判断。这种设计源于实际业务场景——比如公司报销标准和网上的通用标准可能不同，这时候应该信公司内部文档。

@@ -105,15 +105,9 @@ Respond in JSON format:
 }}"""
     
     def __init__(self, llm: BaseLLM):
-        """
-        初始化 Router Agent
-        
-        Args:
-            llm: 语言模型实例
-        """
         self.llm = llm
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", self.SYSTEM_PROMPT),
+            ("system", self.SYSTEM_PROMPT + "\n\nCurrent datetime: {current_datetime}"),
             ("user", "Query: {query}\nContext: {context}")
         ])
         self.chain = self.prompt | self.llm
@@ -131,13 +125,17 @@ Respond in JSON format:
             - agents_to_invoke: 要调用的 Agent 列表（可以是多个！）
             - parallel: 是否并行执行
         """
-        # 构建提示
         context_str = str(context) if context else "No context"
-        
-        # 调用 LLM 进行分类
+
+        from datetime import datetime
+        now = datetime.now()
+        weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        current_dt = f"{now.strftime('%Y-%m-%d')} {weekdays[now.weekday()]} {now.strftime('%H:%M')}"
+
         response = self.chain.invoke({
             "query": query,
-            "context": context_str
+            "context": context_str,
+            "current_datetime": current_dt,
         })
         
         # 解析响应

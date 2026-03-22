@@ -13,3 +13,6 @@ python scripts/query.py "你的问题"
 python scripts/run_agent.py
 
 .venv\Scripts\python.exe scripts/run_agent.py
+
+
+.venv\Scripts\python.exe scripts/start_dashboard.py
