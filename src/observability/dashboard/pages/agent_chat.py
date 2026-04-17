@@ -25,6 +25,7 @@ from src.agent.multi_agent import (
     Citation,
     CitationManager,
 )
+from src.agent.compaction_memory import CompactionMemory, LangGraphMemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +54,14 @@ def initialize_session_state() -> None:
         st.session_state.agent = None
     if "execution_traces" not in st.session_state:
         st.session_state.execution_traces = []
-    # Track uploaded & ingested files: {filename: {status, collection, chunk_count, ...}}
     if "uploaded_files_info" not in st.session_state:
         st.session_state.uploaded_files_info = {}
-    # Session-level collection name (so uploads go to one place)
     if "session_collection" not in st.session_state:
         st.session_state.session_collection = "default"
+    if "compaction_memory" not in st.session_state:
+        st.session_state.compaction_memory = None  # lazily created after agent init
+    if "long_term_memory" not in st.session_state:
+        st.session_state.long_term_memory = LangGraphMemoryStore(user_id="default")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -79,8 +82,10 @@ def get_agent() -> Optional[MultiAgentRAG]:
                 api_key=settings.llm.api_key,
                 base_url=settings.llm.base_url if settings.llm.base_url else None,
             )
+            ltm: LangGraphMemoryStore = st.session_state.long_term_memory
             st.session_state.agent = MultiAgentRAG(
-                llm=llm, settings=settings, enable_logging=True
+                llm=llm, settings=settings, enable_logging=True,
+                store=ltm.store,
             )
             logger.info("Multi-Agent RAG initialized")
         except Exception as e:
@@ -92,15 +97,48 @@ def get_agent() -> Optional[MultiAgentRAG]:
     return st.session_state.agent
 
 
+def _get_compaction_memory() -> CompactionMemory:
+    """Lazily init CompactionMemory with the agent's LLM for compaction."""
+    if st.session_state.compaction_memory is None:
+        agent = get_agent()
+        llm = agent.llm if agent else None
+        st.session_state.compaction_memory = CompactionMemory(
+            llm=llm, token_budget=4000,
+        )
+    return st.session_state.compaction_memory
+
+
 def _build_conversation_history() -> List[Dict[str, str]]:
-    max_turns = 10
-    history: List[Dict[str, str]] = []
-    for msg in st.session_state.get("chat_history", []):
-        role = msg.get("role")
-        content = msg.get("content", "")
-        if role in ("user", "assistant") and content:
-            history.append({"role": role, "content": content[:500]})
-    return history[-max_turns * 2 :]
+    """Build history from CompactionMemory (compaction summary + recent raw).
+
+    Also injects relevant long-term memories recalled via LangGraph Store.
+    """
+    mem = _get_compaction_memory()
+    history = mem.build_history_dicts()
+
+    ltm: LangGraphMemoryStore = st.session_state.long_term_memory
+    last_user = ""
+    for m in reversed(history):
+        if m["role"] == "user":
+            last_user = m["content"]
+            break
+
+    if last_user:
+        recalled = ltm.recall(last_user, top_k=3)
+        if recalled:
+            recall_text = "\n".join(
+                f"- [{r['date']}] {r['content'][:300]}" for r in recalled
+            )
+            history.insert(0, {
+                "role": "user",
+                "content": f"[长期记忆回忆]\n{recall_text}",
+            })
+            history.insert(1, {
+                "role": "assistant",
+                "content": "好的，我已参考了过去的对话记录。",
+            })
+
+    return history
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -350,6 +388,8 @@ def render() -> None:
             st.session_state.chat_history = []
             st.session_state.execution_traces = []
             st.session_state.uploaded_files_info = {}
+            if st.session_state.compaction_memory:
+                st.session_state.compaction_memory.clear()
             st.rerun()
 
         st.divider()
@@ -365,6 +405,29 @@ def render() -> None:
                 if v.get("status") in ("success", "skipped")
             )
             st.metric("已导入文件", n_files)
+
+        st.divider()
+        st.subheader("🧠 记忆系统")
+        mem = st.session_state.compaction_memory
+        if mem:
+            from src.agent.compaction_memory import _estimate_messages_tokens
+            raw_tokens = _estimate_messages_tokens(mem.messages)
+            st.caption(f"短期记忆: {len(mem.messages)} 条 (~{raw_tokens} tokens)")
+            if mem.compaction_summary:
+                with st.expander("📝 Compaction 摘要", expanded=False):
+                    st.markdown(mem.compaction_summary[:600])
+            else:
+                st.caption("暂无压缩摘要 (对话较短)")
+        else:
+            st.caption("记忆系统未激活")
+        ltm_store: LangGraphMemoryStore = st.session_state.long_term_memory
+        counts = ltm_store.get_memory_count()
+        c_mem1, c_mem2 = st.columns(2)
+        with c_mem1:
+            st.metric("会话记忆", counts["conversations"])
+        with c_mem2:
+            st.metric("知识事实", counts["facts"])
+        st.caption("LangGraph Store · JSON 持久化")
 
     # ── Chat history ───────────────────────────────────────────
     for message in st.session_state.chat_history:
@@ -430,6 +493,7 @@ def render() -> None:
         if active_files:
             user_msg["attached_files"] = active_files
         st.session_state.chat_history.append(user_msg)
+        _get_compaction_memory().add("user", prompt)
 
         config = {"routing_mode": routing_mode, "top_k": top_k}
 
@@ -446,6 +510,12 @@ def render() -> None:
             }
             st.session_state.chat_history.append(assistant_message)
             st.session_state.execution_traces.extend(response["execution_trace"])
+            _get_compaction_memory().add("assistant", response["answer"])
+            ltm_store: LangGraphMemoryStore = st.session_state.long_term_memory
+            ltm_store.save_session(
+                _get_compaction_memory().messages,
+                compaction_summary=_get_compaction_memory().compaction_summary,
+            )
             display_chat_message(assistant_message)
             if response["execution_trace"]:
                 display_execution_trace(response["execution_trace"])

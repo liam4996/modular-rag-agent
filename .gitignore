@@ -41,6 +41,7 @@ env/
 # Data
 data/db/
 data/raw/
+data/memory/
 *.db
 *.sqlite
 *.sqlite3

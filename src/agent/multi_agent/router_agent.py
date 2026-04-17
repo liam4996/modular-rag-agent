@@ -40,6 +40,9 @@ class RoutingDecision:
     """
     intent: str
     agents_to_invoke: List[AgentType]
+    needs_local: bool = False
+    needs_web: bool = False
+    complexity: str = "simple"
     parallel: bool = False
     confidence: float = 0.0
     reasoning: str = ""
@@ -63,45 +66,48 @@ class RouterAgent:
     
     SYSTEM_PROMPT = """You are an intent classifier and router for a multi-agent RAG system.
 
-Available intents and routing strategies:
+Classify the user query into FOUR dimensions:
 
-1. CHAT - Simple conversation
-   - Invoke: ChatAgent only
-   - Parallel: False
-   - Examples: "你好", "谢谢", "你是谁", "聊聊天"
+1. intent
+   - chat: simple chitchat / general conversation
+   - fact_query: direct factual question
+   - document_qa: asks about uploaded/local documents or internal knowledge
+   - summarization: asks to summarize a paper, file, report, or document
+   - comparison: compare two methods / products / documents / viewpoints
+   - analysis: asks for deeper judgment, evaluation, recommendation, tradeoff analysis
+   - unknown: impossible or unclear request
 
-2. LOCAL_SEARCH - Search internal knowledge base
-   - Invoke: SearchAgent only
-   - Parallel: False
-   - Examples: "公司文档里关于 RAG 的说明", "我们的 2026 战略", "本地知识库中..."
+2. needs_local
+   - true if the answer should use local knowledge base / uploaded files / internal docs
+   - signals: "根据文档", "上传的 PDF", "内部资料", "本地知识库", paper/file names
 
-3. WEB_SEARCH - Search internet for real-time information
-   - Invoke: WebAgent only
-   - Parallel: False
-   - Examples: "今天 AI 领域的最新新闻", "实时股票价格", "天气", "2025 年 AI 发展"
-   - Keywords: "最新", "今天", "本周", "实时", "新闻", "天气", "股票"
+3. needs_web
+   - true if the answer needs public/latest/external information from the internet
+   - signals: "最新", "今天", "本周", "实时", "新闻", "2026", "官网", "公开资料", "竞品"
 
-4. HYBRID_SEARCH - Search BOTH local and web ⭐ IMPORTANT
-   - Invoke: SearchAgent AND WebAgent
-   - Parallel: True  # Critical: execute in parallel
-   - Examples: 
-     - "结合我们内部的《2026 战略文档》和网上最新的'DeepSeek 行业分析'，写一份对比报告"
-     - "我们公司的产品和技术 + 网上竞品分析"
-     - "内部文档里的 RAG 原理 + 2025 年最新研究进展"
-     - "我们团队的文档和网上的相关资料"
+4. complexity
+   - simple: single-hop, direct answer likely enough
+   - medium: may need synthesis or comparison, but usually one retrieval round is enough
+   - complex: multi-step reasoning, comparison + judgment, planning, or local + web synthesis
 
-5. UNKNOWN - Cannot find answer or impossible query
-   - Will trigger fallback after retries
-   - Examples: "我昨天晚饭吃了什么" (user's private information)
+Routing guidance:
+- chat usually means needs_local=false and needs_web=false
+- document_qa / summarization usually means needs_local=true
+- latest/public/current/trend/comparison with outside world often means needs_web=true
+- if the query explicitly asks to combine internal/local docs with web/public/latest info, set both needs_local=true and needs_web=true
+- comparison / analysis involving "latest", "industry", "public", "research progress" is often complex
 
-Respond in JSON format:
+Respond ONLY in JSON:
 {{
-    "intent": "intent_type",
-    "agents_to_invoke": ["SearchAgent", "WebAgent"],  # Can be multiple!
-    "parallel": true,  # Whether to execute in parallel
-    "confidence": 0.95,
-    "reasoning": "Why this intent was chosen",
-    "parameters": {{}}  # Optional extra parameters
+    "intent": "analysis",
+    "needs_local": true,
+    "needs_web": true,
+    "complexity": "complex",
+    "agents_to_invoke": ["SearchAgent", "WebAgent"],
+    "parallel": true,
+    "confidence": 0.92,
+    "reasoning": "The question requires both uploaded documents and latest public information.",
+    "parameters": {{}}
 }}"""
     
     def __init__(self, llm: BaseLLM):
@@ -144,10 +150,10 @@ Respond in JSON format:
         # 创建 RoutingDecision
         return RoutingDecision(
             intent=result.get("intent", "unknown"),
-            agents_to_invoke=[
-                AgentType(agent.lower().replace("agent", ""))
-                for agent in result.get("agents_to_invoke", [])
-            ],
+            agents_to_invoke=self._build_agents_to_invoke(result),
+            needs_local=bool(result.get("needs_local", False)),
+            needs_web=bool(result.get("needs_web", False)),
+            complexity=str(result.get("complexity", "simple")).lower(),
             parallel=result.get("parallel", False),
             confidence=float(result.get("confidence", 0.0)),
             reasoning=result.get("reasoning", ""),
@@ -177,12 +183,50 @@ Respond in JSON format:
             # 如果还是失败，返回默认值
             return {
                 "intent": "unknown",
+                "needs_local": False,
+                "needs_web": False,
+                "complexity": "simple",
                 "agents_to_invoke": [],
                 "parallel": False,
                 "confidence": 0.0,
                 "reasoning": "Failed to parse response",
                 "parameters": {}
             }
+
+    def _build_agents_to_invoke(self, result: Dict[str, Any]) -> List[AgentType]:
+        """Build invoked agents from explicit source flags, with backward compatibility."""
+        needs_local = bool(result.get("needs_local", False))
+        needs_web = bool(result.get("needs_web", False))
+        intent = str(result.get("intent", "unknown")).lower()
+
+        agents: List[AgentType] = []
+        if needs_local:
+            agents.append(AgentType.SEARCH)
+        if needs_web:
+            agents.append(AgentType.WEB)
+
+        if agents:
+            return agents
+
+        # Backward compatibility with older prompt outputs / fallback parsing
+        for agent in result.get("agents_to_invoke", []):
+            try:
+                parsed = AgentType(agent.lower().replace("agent", ""))
+                if parsed not in agents:
+                    agents.append(parsed)
+            except ValueError:
+                continue
+
+        if agents:
+            return agents
+
+        if intent in ("document_qa", "summarization", "local_search"):
+            return [AgentType.SEARCH]
+        if intent in ("web_search",):
+            return [AgentType.WEB]
+        if intent in ("comparison", "analysis", "hybrid_search"):
+            return [AgentType.SEARCH, AgentType.WEB]
+        return []
     
     def classify_simple(self, query: str) -> str:
         """

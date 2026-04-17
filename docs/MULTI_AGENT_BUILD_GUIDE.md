@@ -497,53 +497,45 @@ class MultiAgentRAG:
         self.web_agent = WebSearchAgent(settings)
         self.eval_agent = EvalAgent(llm)
         self.refine_agent = RefineAgent(llm)
-        self.parallel_controller = ParallelFusionController(...)
         self.workflow = self._build_graph()
 ```
 
 ### 9.2 构建 LangGraph 状态图
 
+当前实现：**统一 `retrieve` 节点** 写入黑板，**hybrid / 低 Router 置信度** 在 `retrieve` 内用 `ThreadPoolExecutor` **真并行**跑本地检索与联网（再进 `eval` 汇合）。这样避免 LangGraph `Send` 并行分支对 `dataclass` 状态合并的限制。
+
 ```python
 def _build_graph(self) -> StateGraph:
     workflow = StateGraph(AgentState)
 
-    # 添加节点（每个节点对应一个 Agent）
     workflow.add_node("router", self._router_node)
-    workflow.add_node("search", self._search_node)
-    workflow.add_node("web", self._web_node)
+    workflow.add_node("retrieve", self._retrieve_node)   # local / web / 并行 both
+    workflow.add_node("web", self._web_node)             # Eval 升级联网专用
     workflow.add_node("eval", self._eval_node)
     workflow.add_node("refine", self._refine_node)
     workflow.add_node("generate", self._generate_node)
 
-    # 入口
     workflow.set_entry_point("router")
 
-    # 条件边：Router 根据意图路由
-    workflow.add_conditional_edges("router", self._route_by_intent, {
-        "generate": "generate",   # chat → 直接生成
-        "search": "search",       # local_search → 本地检索
-        "web": "web",             # web_search → 联网搜索
+    workflow.add_conditional_edges("router", self._route_after_router, {
+        "generate": "generate",
+        "retrieve": "retrieve",
     })
 
-    # 条件边：Search 后判断是否需要 Web（hybrid_search 需要）
-    workflow.add_conditional_edges("search", self._should_search_web, {
-        "yes": "web",   # hybrid → 继续联网
-        "no": "eval",   # 纯本地 → 直接评估
-    })
-
-    # 固定边
-    workflow.add_edge("web", "eval")       # Web → Eval
-    workflow.add_edge("refine", "search")  # Refine → 重新 Search（循环！）
-    workflow.add_edge("generate", END)     # Generate → 结束
-
-    # 条件边：Eval 决定是生成还是重试
-    workflow.add_conditional_edges("eval", self._should_refine, {
+    workflow.add_edge("retrieve", "eval")
+    workflow.add_edge("web", "eval")
+    workflow.add_conditional_edges("eval", self._eval_next_step, {
         "generate": "generate",
         "refine": "refine",
+        "web": "web",
     })
+    workflow.add_edge("refine", "retrieve")
+    workflow.add_edge("generate", END)
 
     return workflow.compile()
 ```
+
+**黑板字段 `retrieve_plan`**：`none`（闲聊）| `local` | `web` | `both`。Router 在 **非 chat 且置信度 &lt; 0.7** 时强制 `both`，与 `HYBRID_SEARCH` / `parallel: true` 一致。
 
 ### 9.3 节点实现模板
 
@@ -602,32 +594,15 @@ def _generate_normal_response_with_citations(self, context):
 ### 9.5 关键条件路由函数
 
 ```python
-def _route_by_intent(self, state) -> Literal["generate", "search", "web"]:
-    intent_to_node = {
-        "chat": "generate",
-        "local_search": "search",
-        "web_search": "web",
-        "hybrid_search": "search",
-        "unknown": "search",  # 重要！未知意图也尝试搜索
-    }
-    return intent_to_node.get(state.intent, "search")
+def _route_after_router(self, state) -> Literal["generate", "retrieve"]:
+    if state.blackboard.get("retrieve_plan") == "none":
+        return "generate"
+    return "retrieve"
 
 def _eval_next_step(self, state) -> Literal["generate", "refine", "web"]:
-    web_attempted = state.blackboard.get("web_search_attempted", False)
-    evaluation = state.evaluation
-    fallback_suggested = evaluation.get("fallback_suggested", False)
-
-    # 重试耗尽或 Eval 建议放弃 → 看联网能不能救
-    if state.fallback_triggered or fallback_suggested:
-        if not web_attempted and state.intent != "web_search":
-            state.blackboard["web_search_attempted"] = True
-            return "web"    # 自动升级联网！
-        return "generate"
-
-    # 质量不够但还有重试次数
-    if evaluation.get("need_refinement") and state.retry_count < state.max_retries:
-        return "refine"
-    return "generate"
+    # 1) 先 Refine（即使本轮已经并行联网过）
+    # 2) 若尚未联网，再按兜底/低置信度升级到 web 节点
+    ...
 ```
 
 ### 9.6 CRAG 噪音过滤 + 信息冲突处理
@@ -827,3 +802,13 @@ else:
 ### Q8: 本地知识库和联网搜索的信息冲突怎么处理？
 
 > 在 Generate Agent 的 System Prompt 中内置了冲突处理原则：(1) 公司政策、内部规范等以本地知识库为权威来源；(2) 客观事实、行业趋势以互联网信息补充；(3) 存在矛盾时明确标注两方来源和差异，不替用户做判断。这种设计源于实际业务场景——比如公司报销标准和网上的通用标准可能不同，这时候应该信公司内部文档。
+
+### Q9: 对话记忆是如何管理的？了解 Compaction 机制吗？
+
+> 我们实现了受 OpenClaw 启发的双层记忆架构：
+>
+> **短期记忆（Compaction）：** 维护一个 token 预算（默认 4000）。当对话历史超出预算时，将较旧的消息通过 LLM 压缩为结构化摘要，强制保留任务状态、关键决策、TODO 和文件名/URL 等标识符。最终上下文 = [compaction 摘要] + [最近 4 条原始消息]，既保留了长程信息又不会超出窗口。
+>
+> **长期记忆（LangGraph Native Store）：** 使用 LangGraph 原生的 `InMemoryStore` 做长期记忆，每条记忆以 JSON 文档格式存储，按 `(user_id, "conversations")` 和 `(user_id, "facts")` 两级命名空间组织。每次对话结束后自动写入 Store；下次对话时用 `recall()` 检索相关记忆注入上下文。Store 通过 JSON 快照持久化到 `data/memory/langgraph_store.json`，进程重启后自动恢复。同时 Store 实例通过 `store=` 参数注入到 LangGraph 图编译中，图内节点可通过 `get_store()` 直接访问长期记忆。
+>
+> 这解决了传统滑动窗口的两个痛点：(1) 窗口外信息完全丢失；(2) 跨 session 没有记忆延续。
