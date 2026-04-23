@@ -701,10 +701,12 @@ class MultiAgentRAG:
     
     def _eval_next_step(self, state: AgentState) -> Literal["generate", "plan", "refine", "web"]:
         """
-        Eval 之后的三路决策（含自动联网升级）。
+        Eval 之后的三路决策（含自动联网升级 + 回退本地检索）。
 
-        注意：先判断 Refine，再判断「是否还能升级联网」——
-        避免 hybrid/并行已联网后无法再走 Refine。
+        注意：
+        - 先判断 Refine，再判断「是否还能升级联网」——
+          避免 hybrid/并行已联网后无法再走 Refine。
+        - 如果联网效果差且仍有重试额度，可回退到本地检索
         """
         web_attempted = state.blackboard.get("web_search_attempted", False)
         evaluation = state.evaluation
@@ -719,6 +721,11 @@ class MultiAgentRAG:
         current_step = int(state.blackboard.get("plan_current_step", 0))
         has_more_plan_steps = current_step < max(len(plan_steps) - 1, 0)
 
+        # 获取当前检索计划和结果
+        retrieve_plan = state.blackboard.get("retrieve_plan", "local")
+        web_results = state.web_results
+        local_results = state.local_results
+
         def _escalate_to_web(reason: str) -> Literal["web"]:
             state.add_execution_trace({
                 "agent": "eval",
@@ -728,6 +735,19 @@ class MultiAgentRAG:
                 "confidence": confidence,
             })
             return "web"
+
+        def _fallback_to_local(reason: str) -> Literal["refine"]:
+            """回退到本地检索：切换 retrieve_plan 并进入 Refine 优化后重试"""
+            state.add_to_blackboard("retrieve_plan", "local", "eval")
+            state.add_execution_trace({
+                "agent": "eval",
+                "action": "fallback_to_local",
+                "reason": reason,
+                "retry_count": state.retry_count,
+                "web_result_count": len(web_results),
+                "confidence": confidence,
+            })
+            return "refine"
 
         # 0. 对复杂任务：如果当前子问题已经足够回答且仍有后续步骤，推进计划
         if enough and has_more_plan_steps:
@@ -748,23 +768,33 @@ class MultiAgentRAG:
         if need_refinement and state.retry_count < state.max_retries:
             return "refine"
 
-        # 2. 已经执行过联网（含并行 retrieve 里的 web）→ 不再「升级联网」
+        # 2. 【新增】联网效果差 → 回退到本地检索
+        # 条件：已执行联网 & 置信度低 & 本地可能有答案（曾有本地结果）& 仍有重试额度
+        if (
+            web_attempted
+            and confidence < 0.4
+            and len(local_results) > 0
+            and state.retry_count < state.max_retries
+        ):
+            return _fallback_to_local("web search confidence too low, falling back to local knowledge")
+
+        # 3. 已经执行过联网（含并行 retrieve 里的 web）→ 不再「升级联网」
         if web_attempted:
             return "generate"
 
-        # 3. 明确兜底/放弃 → 升级联网
+        # 4. 明确兜底/放弃 → 升级联网
         if state.fallback_triggered or fallback_suggested:
             return _escalate_to_web("local search fallback triggered")
 
-        # 4. 重试耗尽但还没联网 → 升级联网
+        # 5. 重试耗尽但还没联网 → 升级联网
         if need_refinement and state.retry_count >= state.max_retries:
             return _escalate_to_web("retries exhausted, trying web as last resort")
 
-        # 5. 置信度偏低 → 联网补充
+        # 6. 置信度偏低 → 联网补充
         if confidence < 0.5:
             return _escalate_to_web(f"low confidence ({confidence}), trying web")
 
-        # 6. 如果是复杂计划，当前步骤已基本完成且没有更多步骤，则生成最终答案
+        # 7. 如果是复杂计划，当前步骤已基本完成且没有更多步骤，则生成最终答案
         if enough and not has_more_plan_steps:
             return "generate"
 
