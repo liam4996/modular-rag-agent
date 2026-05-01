@@ -34,6 +34,13 @@ from src.mcp_server.tools.open_original_document import (
     OpenOriginalDocumentTool,
     register_tool as register_open_original_document,
 )
+from src.mcp_server.tools.query_market_data import (
+    TOOL_NAME as QUERY_MARKET_DATA_NAME,
+    TOOL_DESCRIPTION as QUERY_MARKET_DATA_DESCRIPTION,
+    TOOL_INPUT_SCHEMA as QUERY_MARKET_DATA_SCHEMA,
+    QueryMarketDataTool,
+    register_tool as register_query_market_data,
+)
 
 __all__ = [
     "QUERY_KNOWLEDGE_HUB_NAME",
@@ -58,4 +65,9 @@ __all__ = [
     "OPEN_ORIGINAL_DOCUMENT_SCHEMA",
     "OpenOriginalDocumentTool",
     "register_open_original_document",
+    "QUERY_MARKET_DATA_NAME",
+    "QUERY_MARKET_DATA_DESCRIPTION",
+    "QUERY_MARKET_DATA_SCHEMA",
+    "QueryMarketDataTool",
+    "register_query_market_data",
 ]
