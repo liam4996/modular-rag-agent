@@ -100,6 +100,32 @@ class AgentState:
         """获取优化后的查询"""
         return self.blackboard.get("refined_query", self.user_input)
     
+    # ========== 金融场景新增属性 ==========
+    @property
+    def task_plan(self) -> Dict:
+        return self.blackboard.get("task_plan", {})
+    
+    @property
+    def market_data(self) -> Dict:
+        return self.blackboard.get("market_data", {})
+    
+    @property
+    def computed_results(self) -> Dict:
+        return self.blackboard.get("computed_results", {})
+    
+    @property
+    def chart_paths(self) -> List[str]:
+        return self.blackboard.get("chart_paths", [])
+    
+    @property
+    def generated_report(self) -> Optional[str]:
+        return self.blackboard.get("generated_report")
+    
+    @property
+    def is_financial_intent(self) -> bool:
+        intent = self.blackboard.get("intent", "")
+        return intent.startswith("financial_")
+    
     @property
     def should_fallback(self) -> bool:
         """判断是否应该触发兜底"""
@@ -111,49 +137,19 @@ class AgentState:
     # ========== 辅助方法 ==========
     
     def add_to_blackboard(self, key: str, value: Any, agent: str):
-        """
-        Agent 写入数据到黑板
-        
-        Args:
-            key: 数据键
-            value: 数据值
-            agent: 写入数据的 Agent 名称
-        """
         self.blackboard[key] = value
         self.execution_log.append(f"{agent}: wrote {key}")
     
     def read_from_blackboard(self, key: str) -> Any:
-        """
-        Agent 从黑板读取数据
-        
-        Args:
-            key: 数据键
-            
-        Returns:
-            数据值，如果不存在则返回 None
-        """
         return self.blackboard.get(key)
     
     def increment_retry(self, agent: str):
-        """
-        增加重试次数
-        
-        Args:
-            agent: 调用此方法的 Agent 名称
-        """
         self.retry_count += 1
         self.execution_log.append(
             f"{agent}: retry_count incremented to {self.retry_count}"
         )
     
     def trigger_fallback(self, reason: FallbackReason, agent: str):
-        """
-        触发兜底机制
-        
-        Args:
-            reason: 兜底原因
-            agent: 触发兜底的 Agent 名称
-        """
         self.fallback_triggered = True
         self.fallback_reason = reason
         self.execution_log.append(
@@ -161,31 +157,12 @@ class AgentState:
         )
     
     def add_execution_trace(self, step: Dict[str, Any]):
-        """
-        添加详细的执行轨迹
-        
-        Args:
-            step: 执行步骤信息
-        """
         self.execution_trace.append(step)
     
     def add_metric(self, key: str, value: Any):
-        """
-        记录执行指标
-        
-        Args:
-            key: 指标名称
-            value: 指标值
-        """
         self.metrics[key] = value
     
     def get_all_context(self) -> Dict[str, Any]:
-        """
-        获取所有上下文信息（用于最终生成）
-        
-        Returns:
-            包含所有上下文信息的字典
-        """
         return {
             "user_input": self.user_input,
             "intent": self.intent,
@@ -201,7 +178,6 @@ class AgentState:
         }
     
     def reset(self):
-        """重置状态（用于多轮对话）"""
         self.blackboard.clear()
         self.execution_log.clear()
         self.execution_trace.clear()
@@ -212,12 +188,6 @@ class AgentState:
         self.final_answer = ""
     
     def to_dict(self) -> Dict[str, Any]:
-        """
-        将状态转换为字典（用于序列化）
-        
-        Returns:
-            状态的字典表示
-        """
         return {
             "user_input": self.user_input,
             "blackboard": self.blackboard,
@@ -233,29 +203,17 @@ class AgentState:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentState":
-        """
-        从字典创建状态
-        
-        Args:
-            data: 状态的字典表示
-            
-        Returns:
-            AgentState 实例
-        """
         state = cls()
         state.user_input = data.get("user_input", "")
         state.blackboard = data.get("blackboard", {})
         state.retry_count = data.get("retry_count", 0)
         state.max_retries = data.get("max_retries", 2)
         state.fallback_triggered = data.get("fallback_triggered", False)
-        
         fallback_reason = data.get("fallback_reason")
         if fallback_reason:
             state.fallback_reason = FallbackReason(fallback_reason)
-        
         state.execution_log = data.get("execution_log", [])
         state.execution_trace = data.get("execution_trace", [])
         state.metrics = data.get("metrics", {})
         state.final_answer = data.get("final_answer", "")
-        
         return state
