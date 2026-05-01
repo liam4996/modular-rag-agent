@@ -1,19 +1,13 @@
 """
 Data Processor — Pandas-based financial data cleaning and analysis.
-
-Pure Python functions. Input: structured dicts from market data or RAG extraction.
-Output: cleaned DataFrames, comparison tables, rankings, outlier lists.
 """
 
 from __future__ import annotations
-
 from typing import Any, Dict, List, Optional, Union
-
 import pandas as pd
 
 
 def clean_financial_data(raw_data: List[Dict[str, Any]]) -> pd.DataFrame:
-    """Convert heterogeneous Agent outputs into a unified DataFrame."""
     if not raw_data:
         return pd.DataFrame()
     df = pd.DataFrame(raw_data)
@@ -24,57 +18,43 @@ def clean_financial_data(raw_data: List[Dict[str, Any]]) -> pd.DataFrame:
     return df
 
 
-def build_comparison_table(
-    data_by_symbol: Dict[str, Dict[str, Any]],
-    metrics: List[str],
-) -> pd.DataFrame:
+def build_comparison_table(data_by_symbol, metrics):
     rows = []
     for symbol, d in data_by_symbol.items():
         row = {"symbol": symbol}
         for m in metrics:
             row[m] = d.get(m)
         rows.append(row)
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.set_index("symbol")
-    return df
+    return pd.DataFrame(rows)
 
 
-def rank_companies(
-    df: pd.DataFrame, by_metric: str, ascending: bool = False
-) -> pd.DataFrame:
+def rank_companies(df, by_metric, ascending=False):
     if df.empty or by_metric not in df.columns:
         return df
     return df.sort_values(by_metric, ascending=ascending)
 
 
-def detect_outliers(
-    df: pd.DataFrame, column: str, method: str = "iqr"
-) -> List[int]:
+def detect_outliers(df, column, method="iqr"):
     if df.empty or column not in df.columns:
         return []
     series = df[column].dropna()
     if len(series) < 4:
         return []
     if method == "iqr":
-        q1 = series.quantile(0.25)
-        q3 = series.quantile(0.75)
+        q1 = series.quantile(0.25); q3 = series.quantile(0.75)
         iqr = q3 - q1
-        lower = q1 - 1.5 * iqr
-        upper = q3 + 1.5 * iqr
+        lower = q1 - 1.5 * iqr; upper = q3 + 1.5 * iqr
         mask = (series < lower) | (series > upper)
         return series[mask].index.tolist()
     if method == "zscore":
-        mean = series.mean()
-        std = series.std()
-        if std == 0:
-            return []
+        mean = series.mean(); std = series.std()
+        if std == 0: return []
         z = (series - mean).abs() / std
         return z[z > 3].index.tolist()
     return []
 
 
-def to_markdown_table(df: pd.DataFrame, title: str = "") -> str:
+def to_markdown_table(df, title=""):
     if df.empty:
         return f"**{title}**\n\n(empty)\n" if title else "(empty)\n"
     lines = []
@@ -93,14 +73,10 @@ def to_markdown_table(df: pd.DataFrame, title: str = "") -> str:
     return "\n".join(lines)
 
 
-def aggregate_market_to_table(
-    market_data: Dict[str, Any],
-) -> Dict[str, pd.DataFrame]:
+def aggregate_market_to_table(market_data):
     result = {}
     quotes = market_data.get("quote", [])
-    if quotes:
-        result["quote"] = clean_financial_data(quotes)
+    if quotes: result["quote"] = clean_financial_data(quotes)
     fundamentals = market_data.get("fundamentals", [])
-    if fundamentals:
-        result["fundamentals"] = clean_financial_data(fundamentals)
+    if fundamentals: result["fundamentals"] = clean_financial_data(fundamentals)
     return result

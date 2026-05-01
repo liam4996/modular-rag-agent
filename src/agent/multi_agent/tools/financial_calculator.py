@@ -1,13 +1,11 @@
 """
 Financial Calculator — pure Python computation engine.
-
 Executes financial metric calculations locally without LLM or API calls.
-Input: structured dicts from RAG extraction or market data APIs.
-Output: FinancialMetrics dataclass with categorized metrics.
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+import math
 
 
 @dataclass
@@ -55,6 +53,11 @@ class FinancialMetrics:
 def _safe_div(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
     if numerator is None or denominator is None:
         return None
+    try:
+        if math.isnan(numerator) or math.isnan(denominator):
+            return None
+    except TypeError:
+        pass
     if denominator == 0:
         return None
     return numerator / denominator
@@ -67,11 +70,13 @@ def _round4(val: Optional[float]) -> Optional[float]:
 
 
 def calculate_roe(net_income: Optional[float], equity: Optional[float]) -> Optional[float]:
-    return _safe_div(net_income, equity) * 100 if net_income is not None and equity is not None else None
+    result = _safe_div(net_income, equity)
+    return result * 100 if result is not None else None
 
 
 def calculate_roa(net_income: Optional[float], total_assets: Optional[float]) -> Optional[float]:
-    return _safe_div(net_income, total_assets) * 100 if net_income is not None and total_assets is not None else None
+    result = _safe_div(net_income, total_assets)
+    return result * 100 if result is not None else None
 
 
 def calculate_gross_margin(revenue: Optional[float], cost_of_revenue: Optional[float]) -> Optional[float]:
@@ -114,61 +119,36 @@ def calculate_qoq(current: Optional[float], previous: Optional[float]) -> Option
     return calculate_yoy(current, previous)
 
 
-def compute_all_metrics(
-    financial_data: Optional[Dict[str, Any]] = None,
-    market_data: Optional[Dict[str, Any]] = None,
-) -> FinancialMetrics:
-    """
-    Batch-compute all financial metrics from available data.
-
-    financial_data: dict with keys like net_income, revenue, total_assets, total_equity, etc.
-    market_data: dict with keys like price, eps, bvps, pe, pb, etc.
-    """
+def compute_all_metrics(financial_data=None, market_data=None):
     fd = financial_data or {}
     md = market_data or {}
-
     net_income = fd.get("net_income") or fd.get("net_profit")
     revenue = fd.get("revenue")
     total_assets = fd.get("total_assets")
     total_equity = fd.get("total_equity") or fd.get("equity")
     total_liabilities = fd.get("total_liabilities")
     cost_of_revenue = fd.get("cost_of_revenue") or fd.get("operating_cost")
-    current_assets = fd.get("current_assets")
-    current_liabilities = fd.get("current_liabilities")
-
     price = md.get("price")
     eps = md.get("eps") or fd.get("eps")
     bvps = md.get("bvps") or fd.get("bvps")
     revenue_per_share = md.get("revenue_per_share")
-
-    pe_val = md.get("pe")
-    pb_val = md.get("pb")
-    ps_val = md.get("ps")
-    roe_val = md.get("roe")
-    roa_val = md.get("roa")
-    gross_margin_val = md.get("gross_margin")
-    net_margin_val = md.get("net_margin")
-
+    pe_val = md.get("pe"); pb_val = md.get("pb"); ps_val = md.get("ps")
+    roe_val = md.get("roe"); roa_val = md.get("roa")
+    gross_margin_val = md.get("gross_margin"); net_margin_val = md.get("net_margin")
     metrics = FinancialMetrics()
-
     metrics.valuation["PE"] = pe_val if pe_val is not None else calculate_pe(price, eps)
     metrics.valuation["PB"] = pb_val if pb_val is not None else calculate_pb(price, bvps)
     metrics.valuation["PS"] = ps_val if ps_val is not None else calculate_ps(price, revenue_per_share)
-
     metrics.profitability["ROE"] = roe_val if roe_val is not None else calculate_roe(net_income, total_equity)
     metrics.profitability["ROA"] = roa_val if roa_val is not None else calculate_roa(net_income, total_assets)
     metrics.profitability["gross_margin"] = gross_margin_val if gross_margin_val is not None else calculate_gross_margin(revenue, cost_of_revenue)
     metrics.profitability["net_margin"] = net_margin_val if net_margin_val is not None else calculate_net_margin(net_income, revenue)
-
     metrics.solvency["debt_to_asset"] = calculate_debt_to_asset(total_liabilities, total_assets)
-    metrics.solvency["current_ratio"] = calculate_current_ratio(current_assets, current_liabilities)
-
-    prev_net_income = fd.get("prev_net_income") or fd.get("prev_net_profit")
-    prev_revenue = fd.get("prev_revenue")
-    prev_eps = fd.get("prev_eps")
-
-    metrics.growth["revenue_yoy"] = calculate_yoy(revenue, prev_revenue)
-    metrics.growth["profit_yoy"] = calculate_yoy(net_income, prev_net_income)
+    cur_a = fd.get("current_assets"); cur_l = fd.get("current_liabilities")
+    metrics.solvency["current_ratio"] = calculate_current_ratio(cur_a, cur_l)
+    prev_ni = fd.get("prev_net_income") or fd.get("prev_net_profit")
+    prev_rev = fd.get("prev_revenue"); prev_eps = fd.get("prev_eps")
+    metrics.growth["revenue_yoy"] = calculate_yoy(revenue, prev_rev)
+    metrics.growth["profit_yoy"] = calculate_yoy(net_income, prev_ni)
     metrics.growth["eps_yoy"] = calculate_yoy(eps, prev_eps)
-
     return metrics
