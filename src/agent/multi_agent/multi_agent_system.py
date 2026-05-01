@@ -1,7 +1,7 @@
 """多智能体 RAG 系统 - 主编排器
 
 使用 LangGraph 编排多个专门智能体。
-Phase 2: 集成 Supervisor + FinanceDataAgent，保持向后兼容。
+Phase 3: 集成 BusinessComputeAgent（计算 + 图表 + 报告）。
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +18,7 @@ from .eval_agent import EvalAgent, EvaluationResult
 from .refine_agent import RefineAgent
 from .supervisor_agent import SupervisorAgent
 from .finance_data_agent import FinanceDataAgent
+from .business_compute_agent import BusinessComputeAgent
 from .citation import (
     Citation, CitationType, CitationManager,
     FaithfulnessCheck, format_answer_with_citations,
@@ -37,6 +38,7 @@ class MultiAgentRAG:
         self.refine_agent = RefineAgent(self.llm)
         self.supervisor_agent = SupervisorAgent(self.llm)
         self.finance_data_agent = FinanceDataAgent(self.settings)
+        self.business_compute_agent = BusinessComputeAgent()
         self.workflow = self._build_graph()
 
     _ROUTER_PARALLEL_CONFIDENCE_THRESHOLD = 0.7
@@ -51,6 +53,7 @@ class MultiAgentRAG:
             ("refine", self._refine_node), ("generate", self._generate_node),
             ("supervisor", self._supervisor_node), ("finance_data", self._finance_data_node),
             ("aggregate", self._aggregate_node), ("global_eval", self._global_eval_node),
+            ("business_compute", self._business_compute_node),
         ]:
             workflow.add_node(name, fn)
         workflow.set_entry_point("router")
@@ -60,11 +63,13 @@ class MultiAgentRAG:
             "generate": "generate", "retrieve": "retrieve"})
         workflow.add_conditional_edges("supervisor", self._dispatch_from_supervisor, {
             "retrieve": "retrieve", "web": "web", "finance_data": "finance_data",
-            "aggregate": "aggregate", "generate": "generate"})
+            "aggregate": "aggregate", "generate": "generate",
+            "business_compute": "business_compute"})
         workflow.add_edge("retrieve", "read")
         workflow.add_edge("web", "read")
         workflow.add_edge("read", "eval")
         workflow.add_edge("finance_data", "aggregate")
+        workflow.add_edge("business_compute", "aggregate")
         workflow.add_conditional_edges("eval", self._eval_next_step, {
             "generate": "generate", "plan": "plan", "refine": "refine",
             "web": "web", "aggregate": "aggregate"})
@@ -77,10 +82,8 @@ class MultiAgentRAG:
             kw["store"] = self.store
         return workflow.compile(**kw)
 
-    # ── Router ──
     def _router_node(self, state):
-        decision = self.router_agent.classify(
-            query=state.user_input, context=state.conversation_history)
+        decision = self.router_agent.classify(query=state.user_input, context=state.conversation_history)
         state.add_to_blackboard("intent", decision.intent.lower(), "router")
         state.add_to_blackboard("routing_decision", {
             "agents_to_invoke": [a.value for a in decision.agents_to_invoke],
@@ -117,13 +120,8 @@ class MultiAgentRAG:
         else:
             plan = "local"
         state.add_to_blackboard("retrieve_plan", plan, "router")
-        state.add_execution_trace({"agent": "router", "action": "classify_intent",
-            "result": decision.intent, "confidence": decision.confidence,
-            "needs_local": needs_local, "needs_web": needs_web,
-            "complexity": complexity, "retrieve_plan": plan})
         return state
 
-    # ── Plan ──
     def _plan_node(self, state):
         plan_data = state.blackboard.get("task_plan")
         replan_requested = bool(state.blackboard.get("replan_requested", False))
@@ -154,7 +152,6 @@ class MultiAgentRAG:
         state.add_to_blackboard("active_plan_goal", step.get("goal", ""), "plan")
         return state
 
-    # ── Retrieve ──
     def _retrieve_node(self, state):
         plan = state.blackboard.get("active_retrieve_plan", state.blackboard.get("retrieve_plan", "local"))
         base = state.blackboard.get("active_sub_question", state.user_input)
@@ -162,7 +159,6 @@ class MultiAgentRAG:
         ctx = state.conversation_history
         state.blackboard["retrieval_executed"] = True
         le: Optional[str] = None
-
         def _run_local():
             try:
                 return self.search_agent.search(query=query, top_k=10, context=ctx)
@@ -170,13 +166,11 @@ class MultiAgentRAG:
                 nonlocal le
                 le = str(e)
                 return []
-
         def _run_web():
             try:
                 return self.web_agent.search(query=query, num_results=5, time_range="y", local_results=None)
             except Exception:
                 return []
-
         if plan == "local":
             r = _run_local()
             state.add_to_blackboard("local_results", r, "retrieve")
@@ -197,7 +191,6 @@ class MultiAgentRAG:
             state.blackboard["web_search_attempted"] = True
         return state
 
-    # ── Web ──
     def _web_node(self, state):
         lr = state.read_from_blackboard("local_results")
         q = state.blackboard.get("active_sub_question", state.user_input)
@@ -206,18 +199,14 @@ class MultiAgentRAG:
         state.add_to_blackboard("web_results", wr, "web")
         return state
 
-    # ── Read ──
     def _read_node(self, state):
         sub = state.blackboard.get("active_sub_question", state.user_input)
         goal = state.blackboard.get("active_plan_goal", "")
         reading = self._read_retrieved_evidence(
-            query=sub, goal=goal,
-            local_results=state.local_results, web_results=state.web_results)
+            query=sub, goal=goal, local_results=state.local_results, web_results=state.web_results)
         state.add_to_blackboard("reading_assessment", reading, "read")
         obs = state.blackboard.get("plan_observations", [])
-        obs.append({
-            "step_index": state.blackboard.get("plan_current_step", 0),
-            "sub_question": sub,
+        obs.append({"step_index": state.blackboard.get("plan_current_step", 0), "sub_question": sub,
             "summary": reading.get("summary", ""),
             "enough_to_answer_sub_question": reading.get("enough_to_answer_sub_question", False),
             "suggested_next_action": reading.get("suggested_next_action", ""),
@@ -225,19 +214,16 @@ class MultiAgentRAG:
         state.blackboard["plan_observations"] = obs
         return state
 
-    # ── Eval ──
     def _eval_node(self, state):
         lr = state.local_results
         wr = state.web_results
         q = state.blackboard.get("active_sub_question", state.user_input)
-        ev = self.eval_agent.evaluate(
-            local_results=lr, web_results=wr, query=q,
+        ev = self.eval_agent.evaluate(local_results=lr, web_results=wr, query=q,
             retry_count=state.retry_count, max_retries=state.max_retries)
         state.add_to_blackboard("evaluation", {
             "relevance": ev.relevance, "diversity": ev.diversity,
             "coverage": ev.coverage, "confidence": ev.confidence,
-            "need_refinement": ev.need_refinement,
-            "fallback_suggested": ev.fallback_suggested,
+            "need_refinement": ev.need_refinement, "fallback_suggested": ev.fallback_suggested,
             "reason": ev.reason}, "eval")
         if ev.fallback_suggested:
             if state.retry_count >= state.max_retries:
@@ -248,23 +234,19 @@ class MultiAgentRAG:
                 state.trigger_fallback(FallbackReason.LOW_CONFIDENCE, "eval")
         return state
 
-    # ── Refine ──
     def _refine_node(self, state):
         ed = state.evaluation
         ev = EvaluationResult(
             relevance=ed.get("relevance", 0.5), diversity=ed.get("diversity", 0.5),
             coverage=ed.get("coverage", 0.5), confidence=ed.get("confidence", 0.5),
             need_refinement=ed.get("need_refinement", True),
-            fallback_suggested=ed.get("fallback_suggested", False),
-            reason=ed.get("reason", ""))
+            fallback_suggested=ed.get("fallback_suggested", False), reason=ed.get("reason", ""))
         q = state.blackboard.get("active_sub_question", state.user_input)
-        ref = self.refine_agent.refine(
-            original_query=q, evaluation=ev, retry_count=state.retry_count)
+        ref = self.refine_agent.refine(original_query=q, evaluation=ev, retry_count=state.retry_count)
         state.increment_retry("refine")
         state.add_to_blackboard("refined_query", ref.refined_query, "refine")
         return state
 
-    # ── Generate ──
     def _generate_node(self, state):
         ctx = state.get_all_context()
         has_l = bool(state.local_results)
@@ -299,11 +281,8 @@ class MultiAgentRAG:
         state.add_metric("generation_mode", mode)
         return state
 
-    # ── 金融节点 ──
     def _supervisor_node(self, state):
         self.supervisor_agent.classify_and_plan(state)
-        state.add_execution_trace({"agent": "supervisor", "action": "plan_complete",
-            "task_count": len(state.blackboard.get("task_plan", {}).get("subtasks", []))})
         return state
 
     def _dispatch_from_supervisor(self, state):
@@ -316,15 +295,11 @@ class MultiAgentRAG:
         q = task.get("query", state.user_input)
         state.add_to_blackboard("active_sub_question", q, "supervisor")
         state.add_to_blackboard("current_task", task, "supervisor")
-        state.add_execution_trace({"agent": "supervisor", "action": "dispatch", "task_id": task["id"], "task_type": tt})
-        if tt == "document_search":
-            return "retrieve"
-        elif tt == "web_search":
-            return "web"
-        elif tt == "financial_market":
-            return "finance_data"
-        else:
-            return "aggregate"
+        if tt == "document_search": return "retrieve"
+        elif tt == "web_search": return "web"
+        elif tt == "financial_market": return "finance_data"
+        elif tt == "financial_computation": return "business_compute"
+        else: return "aggregate"
 
     def _finance_data_node(self, state):
         task = state.blackboard.get("current_task", {})
@@ -333,10 +308,18 @@ class MultiAgentRAG:
             sym = self.supervisor_agent._extract_symbols(state.user_input)
         try:
             self.finance_data_agent.query_and_store(
-                state=state, symbols=sym or ["000001.SZ"],
-                data_types=["quote", "fundamentals"])
+                state=state, symbols=sym or ["000001.SZ"], data_types=["quote", "fundamentals"])
         except Exception as e:
             state.add_execution_trace({"agent": "finance_data", "action": "error", "error": str(e)})
+        return state
+
+    def _business_compute_node(self, state):
+        task = state.blackboard.get("current_task", {})
+        operation = task.get("operation", "calculate_metrics")
+        try:
+            self.business_compute_agent.compute(state=state, operation=operation, task_params=task)
+        except Exception as e:
+            state.add_execution_trace({"agent": "business_compute", "action": "error", "error": str(e)})
         return state
 
     def _aggregate_node(self, state):
@@ -353,17 +336,13 @@ class MultiAgentRAG:
         state.add_to_blackboard("global_eval_passed", len(issues) == 0, "global_eval")
         return state
 
-    # ── 路由 ──
     def _route_after_router(self, state):
         intent = (state.intent or "").lower()
         plan = state.blackboard.get("retrieve_plan", "local")
         complexity = state.blackboard.get("query_complexity", "simple")
-        if intent.startswith("financial_"):
-            return "supervisor"
-        if plan == "none":
-            return "generate"
-        if complexity == "complex":
-            return "plan"
+        if intent.startswith("financial_"): return "supervisor"
+        if plan == "none": return "generate"
+        if complexity == "complex": return "plan"
         return "retrieve"
 
     def _route_after_plan(self, state):
@@ -388,32 +367,19 @@ class MultiAgentRAG:
         hm = cs < max(len(ps) - 1, 0)
         wr = state.web_results
         lr = state.local_results
-
         def _web(r): state.add_execution_trace({"agent": "eval", "action": "escalate_to_web", "reason": r}); return "web"
         def _local(r): state.add_to_blackboard("retrieve_plan", "local", "eval"); return "refine"
-
-        if en and hm:
-            state.blackboard["advance_plan_step"] = True
-            return "plan"
-        if na == "search_web" and not wa:
-            return _web("reader suggested web")
-        if nf and state.retry_count < state.max_retries:
-            return "refine"
-        if wa and cf < 0.4 and len(lr) > 0 and state.retry_count < state.max_retries:
-            return _local("web confidence too low")
-        if wa:
-            return "generate"
-        if state.fallback_triggered or fs:
-            return _web("fallback triggered")
-        if nf and state.retry_count >= state.max_retries:
-            return _web("retries exhausted")
-        if cf < 0.5:
-            return _web(f"low confidence ({cf})")
-        if en and not hm:
-            return "generate"
+        if en and hm: state.blackboard["advance_plan_step"] = True; return "plan"
+        if na == "search_web" and not wa: return _web("reader suggested web")
+        if nf and state.retry_count < state.max_retries: return "refine"
+        if wa and cf < 0.4 and len(lr) > 0 and state.retry_count < state.max_retries: return _local("web confidence too low")
+        if wa: return "generate"
+        if state.fallback_triggered or fs: return _web("fallback triggered")
+        if nf and state.retry_count >= state.max_retries: return _web("retries exhausted")
+        if cf < 0.5: return _web(f"low confidence ({cf})")
+        if en and not hm: return "generate"
         return "generate"
 
-    # ── Helpers ──
     @staticmethod
     def _get_date_context():
         from datetime import datetime
@@ -422,41 +388,24 @@ class MultiAgentRAG:
         return f"当前时间：{now.strftime('%Y年%m月%d日')} {wd[now.weekday()]} {now.strftime('%H:%M')}"
 
     def _build_rag_system_prompt(self):
-        return (
-            f"系统信息：{self._get_date_context()}\n\n"
+        return (f"系统信息：{self._get_date_context()}\n\n"
             "你是一个专业的知识库问答助手。根据下方提供的检索结果和对话历史回答用户的问题。\n"
-            "要求：\n"
-            "1. 仅基于检索结果中的信息作答，不要编造内容。\n"
-            "2. 用清晰、结构化的中文回答。如果原文是英文，请翻译为中文后作答。\n"
-            "3. 在回答末尾用 [1][2] 等标注引用了哪些检索结果。\n"
-            "4. 如果检索结果不足以回答问题，如实说明。\n"
-            "5. 结合对话历史理解用户意图。\n"
-            "6. 信息冲突处理原则：公司政策以本地知识库为准，客观事实以互联网信息为补充。\n"
-            "7. 如果上下文中提供了计划观察，请把它们作为多步分析过程中的中间结论，整合进最终答案。\n")
+            "要求：\n1. 仅基于检索结果中的信息作答，不要编造内容。\n"
+            "2. 用清晰、结构化的中文回答。\n3. 在回答末尾用 [1][2] 等标注引用。\n"
+            "4. 如果检索结果不足以回答问题，如实说明。\n5. 结合对话历史理解用户意图。\n")
 
     def _build_general_knowledge_prompt(self):
-        return (
-            f"系统信息：{self._get_date_context()}\n\n"
-            "你是一个知识渊博的AI助手。本地知识库和联网搜索均未能找到与用户问题相关的信息。\n"
-            "请根据你自身的知识储备，用清晰、结构化的中文回答用户的问题。\n"
-            "要求：\n"
-            "1. 在回答开头注明：'以下回答基于AI通用知识，非来自知识库检索。'\n"
-            "2. 尽量准确、客观地回答。\n"
-            "3. 如果你不确定，请如实说明。\n"
-            "4. 结合对话历史理解用户意图。\n")
+        return (f"系统信息：{self._get_date_context()}\n\n"
+            "你是一个知识渊博的AI助手。本地知识库和联网搜索均未能找到相关信息。\n"
+            "请根据你自身的知识储备，用清晰、结构化的中文回答。\n"
+            "在回答开头注明：'以下回答基于AI通用知识，非来自知识库检索。'\n")
 
     def _create_explicit_plan(self, query, conversation_history, routing):
         from langchain_core.messages import HumanMessage
-        prompt = f"""你是一个多步检索规划器。请根据用户问题生成一个显式计划。
-
-要求：将复杂问题拆成 1-3 个子问题。每个子问题指定 preferred_source（local/web/both）。每步给一个简短 goal。只返回 JSON。
-
-用户问题：{query}
-对话历史：{conversation_history}
-路由信息：{routing}
-
-JSON 格式：
-{{"strategy": "...", "steps": [{{"sub_question": "...", "preferred_source": "local", "goal": "..."}}]}}"""
+        prompt = f"""你是一个多步检索规划器。将复杂问题拆成1-3个子问题。
+每子问题指定preferred_source(local/web/both)。只返回JSON。
+用户问题：{query}\n路由信息：{routing}
+JSON格式：{{"strategy":"...","steps":[{{"sub_question":"...","preferred_source":"local","goal":"..."}}]}}"""
         try:
             resp = self.llm.invoke([HumanMessage(content=prompt)])
             content = resp.content if hasattr(resp, "content") else str(resp)
@@ -465,9 +414,8 @@ JSON 格式：
                 return match
         except Exception:
             pass
-        pref = "both" if routing.get("needs_local") and routing.get("needs_web") else (
-            "web" if routing.get("needs_web") else "local")
-        return {"strategy": "默认单步计划", "steps": [{"sub_question": query, "preferred_source": pref, "goal": "回答用户当前问题"}]}
+        pref = "both" if routing.get("needs_local") and routing.get("needs_web") else ("web" if routing.get("needs_web") else "local")
+        return {"strategy":"默认单步计划","steps":[{"sub_question":query,"preferred_source":pref,"goal":"回答用户当前问题"}]}
 
     def _read_retrieved_evidence(self, query, goal, local_results, web_results):
         from langchain_core.messages import HumanMessage
@@ -475,26 +423,17 @@ JSON 格式：
             for i, r in enumerate(local_results[:3], 1)) or "No local results"
         wb = "\n\n".join(f"[Web {i}] {r.get('title',r.get('source','web'))}\n{r.get('snippet',r.get('content',''))[:400]}"
             for i, r in enumerate(web_results[:3], 1)) or "No web results"
-        prompt = f"""你是一个阅读与反思节点。请阅读检索结果，判断当前子问题是否已经有足够证据回答。
-
-当前子问题：{query}
-当前目标：{goal}
-
-本地结果：{lb}
-
-联网结果：{wb}
-
-只返回 JSON：{{"summary": "...", "enough_to_answer_sub_question": true, "suggested_next_action": "continue|search_web|refine|generate", "missing_information": "..."}}"""
+        prompt = f"""阅读检索结果判断是否已有足够证据。当前子问题：{query} 当前目标：{goal}
+本地结果：{lb}\n联网结果：{wb}
+只返回JSON：{{"summary":"...","enough_to_answer_sub_question":true,"suggested_next_action":"continue|search_web|refine|generate","missing_information":"..."}}"""
         try:
             resp = self.llm.invoke([HumanMessage(content=prompt)])
             content = resp.content if hasattr(resp, "content") else str(resp)
             return json.loads(content)
         except Exception:
             enough = bool(local_results or web_results)
-            return {"summary": "已基于当前检索结果完成初步阅读。",
-                "enough_to_answer_sub_question": enough,
-                "suggested_next_action": "continue" if enough else "refine",
-                "missing_information": "" if enough else "当前证据不足。"}
+            return {"summary":"已基于当前检索结果完成初步阅读。","enough_to_answer_sub_question":enough,
+                "suggested_next_action":"continue" if enough else "refine","missing_information":"" if enough else "当前证据不足。"}
 
     def _filter_local_results(self, local_results, eval_confidence):
         if eval_confidence >= 0.7 or not local_results:
@@ -509,8 +448,7 @@ JSON 格式：
         plan_obs = context.get("blackboard", {}).get("plan_observations", [])
         ec = context.get("evaluation", {}).get("confidence", 1.0)
         local_results = self._filter_local_results(local_results, ec)
-        cits = CitationManager.create_citations_from_results(
-            local_results=local_results, web_results=web_results, top_k=5)
+        cits = CitationManager.create_citations_from_results(local_results=local_results, web_results=web_results, top_k=5)
         cm = CitationManager()
         cm.add_citations(cits)
         if not local_results and not web_results:
@@ -525,8 +463,7 @@ JSON 格式：
         ob = ""
         if plan_obs:
             ob = "\n\n## 计划观察\n" + "\n".join(
-                f"- 子问题: {o.get('sub_question','')}\n  观察: {o.get('summary','')}"
-                for o in plan_obs[-5:])
+                f"- 子问题: {o.get('sub_question','')}\n  观察: {o.get('summary','')}" for o in plan_obs[-5:])
         from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
         msgs = [SystemMessage(content=self._build_rag_system_prompt())]
         for t in context.get("conversation_history", []):
@@ -569,10 +506,7 @@ JSON 格式：
             FallbackReason.USER_ASKED_UNKNOWN: "该问题涉及系统无法获取的信息"}
         reason = state.fallback_reason or FallbackReason.NO_RESULTS_FOUND
         rt = rm.get(reason, "经过检索，我无法找到确切答案")
-        return f"""抱歉，{rt}。
-
-检索详情：检索次数 {state.retry_count} 次，本地知识库 {len(state.local_results)} 条，互联网 {len(state.web_results)} 条。
-建议您：1. 重新描述问题，提供更多上下文 2. 尝试使用不同的表述方式 3. 或者询问其他我可能帮助的问题"""
+        return f"""抱歉，{rt}。\n检索详情：检索次数 {state.retry_count} 次，本地知识库 {len(state.local_results)} 条，互联网 {len(state.web_results)} 条。\n建议您：1. 重新描述问题，提供更多上下文 2. 尝试使用不同的表述方式 3. 或者询问其他我可能帮助的问题"""
 
     def run(self, user_input, conversation_history=None):
         s = AgentState(user_input=user_input, conversation_history=conversation_history or [])
