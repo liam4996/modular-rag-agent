@@ -53,17 +53,7 @@ class FinanceDataAgent:
         data_types: Optional[List[str]] = None,
         period: str = "3mo",
     ) -> Dict[str, Any]:
-        """
-        执行金融数据查询。
-
-        Args:
-            symbols: 股票代码列表，如 ["300750.SZ", "AAPL"]
-            data_types: 数据类型，默认全部（quote + fundamentals + history）
-            period: 历史数据周期
-
-        Returns:
-            结构化金融数据 dict，写入 blackboard["market_data"]
-        """
+        """执行金融数据查询。"""
         effective_types = data_types or ["quote", "fundamentals", "history"]
 
         result: Dict[str, Any] = {
@@ -86,42 +76,26 @@ class FinanceDataAgent:
         data_types: List[str],
         period: str,
     ) -> Dict[str, Any]:
-        from src.mcp_server.tools.query_market_data import QueryMarketDataTool
+        from src.mcp_server.tools.query_market_data import QueryMarketDataTool, Market
 
         market = QueryMarketDataTool.classify_symbol(symbol)
+        is_a_share = market == Market.A_SHARE
         result: Dict[str, Any] = {"symbol": symbol, "quote": None, "fundamentals": None, "history": None}
 
-        is_a_share = str(market).endswith("A_SHARE') or market.value == "a_share"
-
         if "quote" in data_types:
-            if is_a_share:
-                quotes = self.tool._fetch_a_share_quote([symbol])
-                if quotes:
-                    result["quote"] = quotes[0].to_dict()
-            else:
-                quotes = self.tool._fetch_yfinance_quote([symbol])
-                if quotes:
-                    result["quote"] = quotes[0].to_dict()
+            quotes = self.tool._fetch_a_share_quote([symbol]) if is_a_share else self.tool._fetch_yfinance_quote([symbol])
+            if quotes:
+                result["quote"] = quotes[0].to_dict()
 
         if "fundamentals" in data_types:
-            if is_a_share:
-                funds = self.tool._fetch_a_share_fundamentals([symbol])
-                if funds:
-                    result["fundamentals"] = funds[0].to_dict()
-            else:
-                funds = self.tool._fetch_yfinance_fundamentals([symbol])
-                if funds:
-                    result["fundamentals"] = funds[0].to_dict()
+            funds = self.tool._fetch_a_share_fundamentals([symbol]) if is_a_share else self.tool._fetch_yfinance_fundamentals([symbol])
+            if funds:
+                result["fundamentals"] = funds[0].to_dict()
 
         if "history" in data_types:
-            if is_a_share:
-                histories = self.tool._fetch_a_share_history([symbol], period)
-                if histories:
-                    result["history"] = histories[0].to_dict()
-            else:
-                histories = self.tool._fetch_yfinance_history([symbol], period)
-                if histories:
-                    result["history"] = histories[0].to_dict()
+            histories = self.tool._fetch_a_share_history([symbol], period) if is_a_share else self.tool._fetch_yfinance_history([symbol], period)
+            if histories:
+                result["history"] = histories[0].to_dict()
 
         return result
 
@@ -140,18 +114,7 @@ class FinanceDataAgent:
         data_types: Optional[List[str]] = None,
         period: str = "3mo",
     ) -> Any:
-        """
-        查询金融数据并写入 AgentState.blackboard["market_data"]。
-
-        Args:
-            state: AgentState 实例
-            symbols: 股票代码列表
-            data_types: 数据类型
-            period: 历史数据周期
-
-        Returns:
-            更新后的 AgentState
-        """
+        """查询金融数据并写入 AgentState.blackboard["market_data"]。"""
         data = self.query(symbols=symbols, data_types=data_types, period=period)
 
         existing = state.blackboard.get("market_data", {})
