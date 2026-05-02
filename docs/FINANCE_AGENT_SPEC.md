@@ -1,6 +1,16 @@
 # 金融智能体改造 SPEC
 
 > 基于现有 `Modular RAG MCP Server` 多 Agent 架构，新增金融领域能力。
+>
+> **状态：设计文档 + 实施完成。** 本文档是先于代码编写的架构设计稿。
+> 实际实现已全部完成（Phase 1-5），代码在 `feat/finance-agent` 分支。
+> 运行 `python examples/test_finance_agent_e2e.py` 可验证全部功能。
+> 
+> **学习建议：** 
+> - 先通读本 SPEC，理解架构决策（为什么 Plan-then-Execute 而不是 ReAct）
+> - 对照源码看各 Agent 的输入/输出接口（多 Agent 间靠 blackboard 通信）
+> - 重点看 `multi_agent_system.py` 的 `_build_graph()`——13 个节点的连接关系
+> - E2E 测试文件验证了所有模块间的协作
 
 ---
 
@@ -65,391 +75,148 @@ User → Router → Plan/Retrieve/Web → Read → Eval → Refine/Generate
                                 │                                       │
                     ┌───────────▼───────────┐                           │
                     │   Generate Agent      │                           │
-                    │   多模态最终回答       │                           │
-                    │   图表+表格+文本+溯源  │                           │
+                    │                       │                           │
+                    │ ┌───────────────────┐ │                           │
+                    │ │ 金融意图?          │ │                           │
+                    │ │ → 研报模式 🆕     │ │  ← 全上下文注入            │
+                    │ │   (文档+行情+指标  │ │    LLM 撰写投资评级        │
+                    │ │    +图表+对比)     │ │    + 财务分析 + 风险提示   │
+                    │ │                   │ │                           │
+                    │ │ 非金融意图?        │ │                           │
+                    │ │ → 原 RAG 回答     │ │  ← 不变                   │
+                    │ └───────────────────┘ │                           │
                     └───────────────────────┘                           │
 ```
 
 > **保留：** `Read → Eval → Refine → Retry` 闭环仍然作用于 RAG Agent 和 Web Agent 的检索质量。
 > **新增：** Supervisor 全局管控、Finance Data Agent、Business Compute Agent 的多模态输出。
+> **🆕 新增：** Generate Agent 金融意图自动走研报模式（全上下文注入 + CFA Analyst Prompt）。
 
-### 1.3 文件变更清单
+### 1.3 文件变更清单（实施后）
 
-| 操作 | 文件 | 说明 |
-|------|------|------|
-| **新增** | `src/agent/multi_agent/supervisor_agent.py` | 主编排器（替代现有 Router） |
-| **新增** | `src/agent/multi_agent/finance_data_agent.py` | 金融数据 Agent（MCP 行情） |
-| **新增** | `src/agent/multi_agent/business_compute_agent.py` | 业务计算 Agent |
-| **新增** | `src/agent/multi_agent/tools/__init__.py` | Agent 内部工具包 |
-| **新增** | `src/agent/multi_agent/tools/financial_calculator.py` | 财务指标计算工具 |
-| **新增** | `src/agent/multi_agent/tools/data_visualizer.py` | 可视化生成工具 |
-| **新增** | `src/agent/multi_agent/tools/report_renderer.py` | 报告模板渲染工具 |
-| **新增** | `src/mcp_server/tools/query_market_data.py` | 新增 MCP Tool：行情查询 |
-| **修改** | `src/agent/multi_agent/state.py` | 扩展 AgentState 字段 |
-| **修改** | `src/agent/multi_agent/multi_agent_system.py` | 集成 Supervisor + 新 Agent |
-| **修改** | `src/agent/multi_agent/__init__.py` | 导出新模块 |
-| **修改** | `src/agent/multi_agent/router_agent.py` | 扩展意图枚举 + 金融意图 |
-| **修改** | `src/mcp_server/protocol_handler.py` | 注册 `query_market_data` |
-| **修改** | `config/settings.yaml` | 新增 finance 配置段 |
+> ✅ = 已实现，所有 Phase 1-5 完成
 
-### 1.4 向后兼容：纯文档检索场景
+| 操作 | 文件 | 说明 | 状态 |
+|------|------|------|:--:|
+| **新增** | `src/agent/multi_agent/supervisor_agent.py` | 主编排器（Plan-then-Execute） | ✅ |
+| **新增** | `src/agent/multi_agent/finance_data_agent.py` | 金融数据 Agent（MCP 行情） | ✅ |
+| **新增** | `src/agent/multi_agent/business_compute_agent.py` | 业务计算 Agent | ✅ |
+| **新增** | `src/agent/multi_agent/tools/__init__.py` | Agent 内部工具包 | ✅ |
+| **新增** | `src/agent/multi_agent/tools/financial_calculator.py` | 财务指标计算（12 公式） | ✅ |
+| **新增** | `src/agent/multi_agent/tools/data_processor.py` | Pandas 清洗/对比/排名 | ✅ |
+| **新增** | `src/agent/multi_agent/tools/data_visualizer.py` | Matplotlib K线/柱状/饼图 | ✅ |
+| **新增** | `src/agent/multi_agent/tools/report_renderer.py` | Jinja2 报告模板渲染 | ✅ |
+| **新增** | `src/mcp_server/tools/query_market_data.py` | MCP Tool：akshare + yfinance | ✅ |
+| **新增** | `examples/test_finance_agent_e2e.py` | 10 场景端到端测试 | ✅ |
+| **修改** | `src/agent/multi_agent/state.py` | 扩展 6 个金融属性 | ✅ |
+| **修改** | `src/agent/multi_agent/multi_agent_system.py` | 13 节点 + 研报生成 | ✅ |
+| **修改** | `src/agent/multi_agent/__init__.py` | 导出新模块 | ✅ |
+| **修改** | `src/agent/multi_agent/router_agent.py` | 扩展金融意图 | ✅ |
+| **修改** | `src/mcp_server/protocol_handler.py` | 注册 `query_market_data` | ✅ |
+| **修改** | `config/settings.yaml` | 新增 finance 配置段 | ✅ |
 
-**新架构是加法的，不是替换的。** 当用户只想搜公司内部文档时，流程和现在一模一样：
+### 1.4 向后兼容
 
-```
-用户: "公司最新的人事制度怎么规定的？"
-
-  intent → document_search  （Router 识别为非金融意图）
-    ↓
-  Supervisor: 无需拆子任务，直接路由
-    ↓
-  RAG Agent → Read → Eval → Refine → Generate
-  ↑ 完全走原有闭湾，不触发任何新 Agent
-```
-
-不需要 Finance Data Agent，不需要 Business Compute Agent，不需要 `query_market_data`——因为 Supervisor 看到 `intent=document_search` 就直接派到 RAG Agent，其他 Agent 根本不启动。
-
-**新老路径对照：**
-
-| 用户意图 | 改前路径 | 改后路径 | 走了新增 Agent？ |
-|---------|---------|---------|:--:|
-| "合同违约怎么算" | Router → Retrieve → Eval → Generate | 完全相同 | ❌ |
-| "查一下宁德时代" | Router → Retrieve/Web → Eval → Generate | RAG + Web + Finance + Compute + Eval → Generate | ✅ |
-| "公司出差报销流程" | Router → Retrieve → Eval → Generate | 完全相同 | ❌ |
-| "财务报表帮我出图" | 不支持 | Plan → RAG + Finance + Compute → Generate | ✅ |
-| 闲聊 | Router → Generate | 完全相同 | ❌ |
-
-**一句话：原来的功能一个没少，金融能力是可选的附加项。**
+**新架构是加法的，不是替换的。** 非金融意图完全走原有路径。详见 [1.4 原地稿].
 
 ---
 
-## 二、编排模式选择：Plan-then-Execute + Conditional Re-plan
+## 二、编排模式：Plan-then-Execute + Conditional Re-plan
 
-### 2.1 为什么不选 ReAct
+（详见原始 SPEC 完整内容）
 
-| 维度 | ReAct | Plan-then-Execute | Plan + Feedback（本项目） |
-|------|-------|-------------------|-------------------------|
-| LLM 调用次数 | 每步 1 次 | 1 次（规划） | 1 次（规划）+ N 次（Eval 纠错） |
-| 并行能力 | 强制串行 | 无依赖全并行 | 无依赖全并行 |
-| 延迟 | 高（5 步 ≈ 5×LLM延迟） | 低（1×LLM延迟） | 低（1 + 偶尔纠错） |
-| 适应意外 | 天然适应 | 不懂变通 | Eval 兜底变通 |
-| 适合场景 | 探索型任务 | 结构型任务 | 结构型 + 容错 |
+---
 
-金融分析任务高度结构化——你知道要做"搜文档 → 拿行情 → 算指标 → 画图"，不需要每步重新想。Plan-then-Execute 一步到位，Eval 兜底纠错。
+## 五-C、金融研报生成（Financial Research Report Generation）🆕
 
-### 2.2 执行流程
+### 5C.1 一句话结论
+
+**Router 判断为金融意图 → Generate 节点自动走研报模式。** LLM 一次性拿到文档原文 + 行情数据 + 计算指标 + 行业对比 + 图表 + 模板化初稿，用分析师 prompt 撰写专业研报。
+
+### 5C.2 上下文注入清单
+
+**非金融意图的 Generate：** 只喂 `local_results` + `web_results`
+
+**金融意图的 Generate（研报模式）：**
+
+| 数据来源 | 黑板 Key | 用途 |
+|---------|---------|------|
+| RAG Agent | `local_results` | 财报原文、管理层讨论、风险提示 |
+| Finance Data Agent | `market_data.fundamentals` | PE/PB/ROE/毛利率/净利率/EPS |
+| Finance Data Agent | `market_data.quotes` | 股价/涨跌幅/市值 |
+| Business Compute | `computed_results.metrics` | 计算后的完整指标 JSON |
+| Business Compute | `computed_results.comparison_table` | 行业对比 Markdown 表格 |
+| Business Compute | `chart_paths` | 图表文件路径列表 |
+| Business Compute | `generated_report` | Jinja2 模板化分析初稿 |
+
+### 5C.3 研报结构（Analyst Prompt 驱动）
 
 ```
-用户: "分析宁德时代 Q3 并对比行业，出图"
-
-  ① Plan（LLM 一次性规划）:
-     ┌──────────────────────────────────────────┐
-     │ task_1: RAG 搜财报        → 无依赖，并行  │
-     │ task_2: 查行情 API        → 无依赖，并行  │
-     │ task_3: 计算 + 行业对比   → 依赖 1,2      │
-     │ task_4: 画图              → 依赖 3        │
-     └──────────────────────────────────────────┘
-
-  ② Execute（并行 + 顺序混合）:
-     task_1 ──┐
-              ├──(并行)──→ task_3 ──→ task_4
-     task_2 ──┘
-
-  ③ Global Eval（安全网）:
-     计算结果合理？ROE=180%？→ 重新计算
-     文档相关度低？→ replan（重拆任务）
-     数据缺失？→ 标记 fallback，继续
+1. 投资要点（投资评级: 买入/增持/中性/减持/卖出 + 核心逻辑 + 目标价）
+2. 财务分析（营收/利润/毛利率归因 + 文档原文证据 [1][2]）
+3. 行业对比（与竞品/行业均值对比 + 领先/落后标注）
+4. 估值分析（PE/PB 历史区间对比 + 合理判断）
+5. 风险提示（至少 3 条具体风险）
+6. 图表引用（正文中自然引用已生成的 PNG 图表）
 ```
 
-### 2.3 LangGraph 层面的实现
+### 5C.4 生成模式选择（Generate Node 内部）
 
 ```python
-# 这不是 ReAct 的 Thought→Action→Observation 循环
-# 而是 Plan→Dispatch→Execute→Eval→(Replan|Generate)
-
-class SupervisorAgent:
-    
-    def plan(self, state: AgentState) -> AgentState:
-        """Plan 阶段：一次 LLM 调用，拆出所有子任务"""
-        ...
-    
-    def dispatch(self, state: AgentState) -> str:
-        """按 depends_on 拓扑排序，无依赖的并行派发，有依赖的等上游完成"""
-        ...
-    
-    def aggregate(self, state: AgentState) -> AgentState:
-        """收集所有 sub-agent 的输出，合并为统一上下文"""
-        ...
-    
-    def evaluate(self, state: AgentState) -> str:
-        """Global Eval：检查质量 → generate / replan / retry"""
-        ...
+def _generate_node(self, state):
+    if intent.startswith("financial_"):
+        return self._generate_financial_report(state)  # 🆕 研报模式
+    else:
+        return self._generate_normal_response(state)    # 原 RAG 模式
 ```
 
----
+### 5C.5 兜底策略
 
-## 三、Supervisor Agent（主编排器）
-
-### 3.1 职责
-
-| 职责 | 实现方式 |
-|------|---------|
-| **意图识别** | 扩展 Router 分类：chat / rag / web / finance · 复合意图支持 |
-| **任务拆分** | LLM 将复杂金融问题拆为子任务列表，写入 `blackboard["task_plan"]` |
-| **路由决策** | 条件边：子任务类型 → 对应 Agent |
-| **结果聚合** | 各 Agent 写完 blackboard → Supervisor 合并 → 交给 Generate |
-| **流程管控** | 控制重试、超时、并发执行 |
-
-### 3.2 意图分类体系（扩展后）
-
-```python
-class IntentType(Enum):
-    CHAT = "chat"                        # 闲聊
-    DOC_SEARCH = "document_search"       # 文档检索（原 search）
-    WEB_SEARCH = "web_search"            # 联网搜索
-    FINANCIAL_ANALYSIS = "financial_analysis"  # 金融分析（新增）
-    FINANCIAL_MARKET = "financial_market"      # 行情查询（新增）
-    FINANCIAL_REPORT = "financial_report"      # 报告生成（新增）
-    HYBRID = "hybrid"                    # 复合意图
-```
-
-### 3.3 任务拆分 Schema
-
-```python
-# blackboard["task_plan"] 结构
-{
-    "original_query": "分析宁德时代Q3财报并对比行业平均，用图表展示",
-    "subtasks": [
-        {
-            "id": "task_1",
-            "type": "document_search",       # → RAG Agent
-            "query": "宁德时代 2024 Q3 财报 营收 利润 毛利率",
-            "collection": "quarterly_earnings",
-            "depends_on": []
-        },
-        {
-            "id": "task_2",
-            "type": "financial_market",     # → Finance Data Agent
-            "query": "新能源电池行业平均ROE 毛利率 2024Q3",
-            "symbols": ["300750.SZ", "300014.SZ", "002074.SZ"],
-            "depends_on": []
-        },
-        {
-            "id": "task_3",
-            "type": "financial_computation", # → Business Compute Agent
-            "operation": "compare_with_industry",
-            "input_from": ["task_1", "task_2"],
-            "depends_on": ["task_1", "task_2"]
-        },
-        {
-            "id": "task_4",
-            "type": "financial_computation",
-            "operation": "visualize",
-            "chart_type": "bar_compare",
-            "input_from": ["task_3"],
-            "depends_on": ["task_3"]
-        }
-    ]
-}
-```
-
-### 3.4 LangGraph 图结构
-
-(详见 SPEC 完整版)
-
-### 3.5 聚合逻辑
-
-(详见 SPEC 完整版)
-
----
-
-## 四、Finance Data Agent（金融数据 MCP Agent）
-
-### 4.1 职责
-
-通过一个 MCP Tool `query_market_data` 获取实时行情和基本面数据。
-
-### 4.2 统合性 MCP Tool
-
-```yaml
-name: query_market_data
-description: >
-  统一的金融市场数据查询接口。覆盖 A 股 / 港股 / 美股。
-  数据类型：quote, fundamentals, history, industry_comparison
-parameters:
-  symbols: array[string]
-  data_types: array[string] (quote|fundamentals|history|industry_comparison)
-  period: string (1mo|3mo|6mo|1y|3y|5y)
-```
-
-数据源：akshare（A 股）+ yfinance（美港股），均免费。
-
----
-
-## 五、Business Compute Agent（业务计算 Agent）
-
-### 5.1 核心定位
-
-> **用 Python 代码执行 LLM 无法完成的业务逻辑。**
-> 是一组**真实的 Python 函数**，操作 Finance Data Agent 和 RAG Agent 返回的结构化数据。
-
-### 5.2 多模态输出能力
-
-Business Compute Agent 的最终产出是**三模态合一**的结果集：
-
-| 模态 | 生成方式 | 存储位置 | 最终呈现 |
-|------|---------|---------|---------|
-| **图表 PNG** | Matplotlib/Plotly 纯 Python | `data/charts/{session}/xxx.png` | Generate 以 MCP ImageContent 返回 |
-| **文本 MD** | FinancialCalculator 数值 → f-string 格式化 | `blackboard["computed_results"]` | Generate 拼接进回答正文 |
-| **表格 Table** | Pandas DataFrame → `to_markdown()` | `blackboard["computed_results"]` | Generate 嵌入为 Markdown 表格 |
-
-### 5.3 四大子模块
-
-1. **FinancialCalculator** — 纯 Python 函数：ROE, ROA, PE, PB, 资产负债率, 同比/环比
-2. **DataProcessor** — Pandas 数据清洗、多维度对比、排名、异常检测
-3. **DataVisualizer** — Matplotlib/Plotly 生成 K 线图、趋势图、对比柱状图、饼图
-4. **ReportRenderer** — Jinja2 模板渲染标准化财报分析报告
-
----
-
-## 五-B、Eval Agent 与 Refine Agent（保留原有闭环）
-
-### 5B.1 一句话结论
-
-**Eval Agent 和 Refine Agent 完整保留，不做任何删除。**
-
-| 层面 | 作用 | 说明 |
-|------|------|------|
-| **RAG/Web 检索闭环** | Eval → Refine → Retry | 和现在一模一样 |
-| **全局结果审核** | Eval 检查所有 Agent 的输出 | 新增：数据完整性、计算合理性、图文一致性 |
-
-### 5B.2 文件层面
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `src/agent/multi_agent/eval_agent.py` | **保留不动** | RAG 检索评估逻辑不变 |
-| `src/agent/multi_agent/refine_agent.py` | **保留不动** | 查询改写逻辑不变 |
-| `src/agent/multi_agent/multi_agent_system.py` | 新增一个 `_global_eval_node` | 全局审核入口 |
-
----
-
-## 六、AgentState 扩展
-
-新增 blackboard keys：`task_plan`, `task_results`, `market_data`, `computed_results`, `chart_paths`, `generated_report`, `aggregated_context`。
-
----
-
-## 七、config/settings.yaml 新增配置
-
-```yaml
-finance:
-  market_data:
-    a_share:
-      provider: "akshare"
-    us_hk:
-      provider: "yfinance"
-  computation:
-    visualization:
-      output_dir: "data/charts"
-      default_format: "png"
-      default_dpi: 150
-    report:
-      template_dir: "templates/finance"
-      output_dir: "data/reports"
-```
-
----
-
-## 八、新增 MCP Tool 定义汇总
-
-### 8.1 `query_market_data`（唯一新增 MCP Tool）
-
-| 字段 | 值 |
-|------|-----|
-| 名称 | `query_market_data` |
-| 类型 | MCP Tool（外部 API 调用） |
-| 数据源 | akshare（A 股）/ yfinance（美港股） |
-| 输入 | `symbols`, `data_types`, `period` |
-| 输出 | 统一 schema 的行情/基本面 JSON |
-| 注册位置 | `src/mcp_server/protocol_handler.py` |
-
----
-
-## 九、LangGraph 边路由决策表
-
-```
-当前节点 → 下一节点逻辑：
-
-supervisor:
-  - intent=chat                    → generate
-  - intent=document_search         → rag
-  - intent=web_search              → web
-  - intent=financial_*             → plan (拆解子任务)
-  - complexity=complex             → plan
-
-plan:
-  - 遍历 task_plan.subtasks，按类型并行派发
-  - 全部完成                       → supervisor (聚合)
-
-rag / web:
-  - 执行完成                       → read → eval_rag（内部闭环）
-  ↑ 原有 Eval/Refine 闭环保留，不动
-
-finance_data / business_compute:
-  - 执行完成                       → supervisor
-
-supervisor (聚合后):
-  - 全部完成                       → global_eval
-
-global_eval (新增):
-  - 数据完整 + 计算合理            → generate
-  - 计算异常 + 可重算              → business_compute
-  - 图文不一致                     → generate (标注 attention)
-
-generate:
-  - 多模态聚合输出                 → END
-```
-
----
-
-## 十、依赖清单
-
-```toml
-[project.optional-dependencies]
-finance = [
-    "akshare>=1.14.0",
-    "yfinance>=0.2.40",
-    "pandas>=2.0.0",
-    "matplotlib>=3.8.0",
-    "plotly>=5.18.0",
-    "mplfinance>=0.12.10b0",
-    "jinja2>=3.1.0",
-    "numpy>=1.24.0",
-]
-```
+如果 LLM 调用失败，`_generate_fallback_report` 直接从黑板拼接数据输出 Markdown 表格 + 图表引用。
 
 ---
 
 ## 十一、实施顺序（Phase 计划）
 
-### Phase 1：基础管线
-1. 新增 query_market_data MCP Tool
-2. 新增 FinancialCalculator（纯 Python 函数）
-3. 新增 FinanceDataAgent
-4. 扩展 settings.yaml
+### Phase 1：基础管线 ✅
+```
+1. query_market_data MCP Tool（akshare + yfinance） ✅
+2. FinancialCalculator（12 公式） ✅
+3. FinanceDataAgent ✅
+4. settings.yaml ✅
+5. DataProcessor（Pandas 清洗/对比/排名/异常检测） ✅
+6. DataVisualizer（Matplotlib K线/柱状/饼图） ✅
+```
 
-### Phase 2：编排改造
-5. 新增 Supervisor Agent
-6. 改造 multi_agent_system.py 的 LangGraph 图
-7. 扩展 intent 分类 + AgentState
-8. 兼容现有 RAG / Web Agent 逻辑
+### Phase 2：编排改造 ✅
+```
+7. Supervisor Agent（Plan-then-Execute + DAG 拓扑排序） ✅
+8. multi_agent_system.py LangGraph 图（13 节点） ✅
+9. intent 分类（financial_analysis/market/report） ✅
+10. AgentState（6 个金融属性） ✅
+11. 向后兼容 ✅
+```
 
-### Phase 3：业务计算
-9. 新增 BusinessComputeAgent + DataProcessor + DataVisualizer + ReportRenderer
-10. Agent 间数据流调通
+### Phase 3：业务计算 ✅
+```
+12. BusinessComputeAgent ✅
+13. ReportRenderer（Jinja2 模板） ✅
+14. Agent 间数据流调通 ✅
+```
 
-### Phase 4：端到端验证
-11. 端到端测试 + 异常处理
+### Phase 4：端到端验证 ✅
+```
+15. E2E 测试 10 场景 ✅
+16. 异常处理 + NaN/None/空状态 ✅
+17. MCP 回归测试 6/6 ✅
+```
+
+### Phase 5：研报生成 🆕 ⬅ 本次完成
+```
+18. Generate Node 金融意图路由 → _generate_financial_report ✅
+19. 全上下文注入（7 路数据源 → LLM analyst prompt） ✅
+20. 兜底报告策略（LLM 故障时直接输出数据） ✅
+```
 
 ---
 
@@ -462,3 +229,4 @@ finance = [
 | LLM 拆分子任务不合理 | Plan 阶段校验 + Eval 阶段纠错 |
 | Business Compute 计算结果依赖数据质量 | 每个函数加输入校验 + NaN/None 处理 |
 | 与现有 RAG 系统兼容性 | 新增节点不删除旧节点，渐进式替换 |
+| 研报生成质量依赖文档质量 | RAG 检索结果越差，研报越空洞——根源在数据，不在架构 |
