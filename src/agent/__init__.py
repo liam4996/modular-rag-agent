@@ -1,38 +1,54 @@
 """Agent package for Modular RAG MCP Server.
 
-说明：
-    这里提供了 Agent 封装，把底层的 RAG / 向量库工具
-    （如 `query_knowledge_hub`、`list_collections` 等）包装成一个
-    可规划、可追踪的智能 Agent。
-
-常用入口：
-    >>> from src.agent import SimpleAgent
-    >>> agent = SimpleAgent()
-    >>> resp = agent.run("查询论文结论")
-    
-    >>> from src.agent import ReActAgent
-    >>> agent = ReActAgent()
-    >>> resp = agent.run("总结这份文档")
-    >>> for step in resp.steps:
-    >>>     print(f"Step {step.step}: {step.thought}")
+当前系统使用的 Agent 全部在 multi_agent/ 子包中。
+此 __init__.py 仅作为包标记，主要入口请使用 `from src.agent.multi_agent import ...`。
 """
 
-from .simple_agent import SimpleAgent, AgentResponse, AgentStep
-from .react_agent import ReActAgent, ReActResponse, ReActStep
-from .memory import ConversationMemory
-from .tool_chain import ToolChainExecutor, ChainStep, ChainStepType, ChainResult
+from .multi_agent import (
+    AgentState,
+    FallbackReason,
+    RouterAgent,
+    AgentType,
+    RoutingDecision,
+    SearchAgent,
+    WebSearchAgent,
+    ParallelFusionController,
+    EvalAgent,
+    EvaluationResult,
+    RefineAgent,
+    RefinementResult,
+    SupervisorAgent,
+    FinanceDataAgent,
+    BusinessComputeAgent,
+    MultiAgentRAG,
+    Citation,
+    CitationType,
+    CitationManager,
+    FaithfulnessCheck,
+    format_answer_with_citations,
+)
 
 __all__ = [
-    "SimpleAgent", 
-    "AgentResponse", 
-    "AgentStep",
-    "ReActAgent",
-    "ReActResponse",
-    "ReActStep",
-    "ConversationMemory",
-    "ToolChainExecutor",
-    "ChainStep",
-    "ChainStepType",
-    "ChainResult",
+    "AgentState",
+    "FallbackReason",
+    "RouterAgent",
+    "AgentType",
+    "RoutingDecision",
+    "SearchAgent",
+    "WebSearchAgent",
+    "ParallelFusionController",
+    "EvalAgent",
+    "EvaluationResult",
+    "RefineAgent",
+    "RefinementResult",
+    "SupervisorAgent",
+    "FinanceDataAgent",
+    "BusinessComputeAgent",
+    "MultiAgentRAG",
+    "Citation",
+    "CitationType",
+    "CitationManager",
+    "FaithfulnessCheck",
+    "format_answer_with_citations",
 ]
-__version__ = "0.4.0"
+__version__ = "0.5.0"

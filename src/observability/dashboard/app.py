@@ -11,6 +11,13 @@ from __future__ import annotations
 
 import streamlit as st
 
+from dotenv import load_dotenv
+from pathlib import Path as _Path
+
+_env_path = _Path(__file__).resolve().parents[3] / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+
 
 # ── Page definitions ─────────────────────────────────────────────────
 
@@ -54,6 +61,11 @@ def _page_agent_chat() -> None:
     render()
 
 
+def _page_research_report() -> None:
+    from src.observability.dashboard.pages.research_report import render
+    render()
+
+
 # ── Navigation ───────────────────────────────────────────────────────
 
 pages = [
@@ -65,6 +77,7 @@ pages = [
     st.Page(_page_evaluation_panel, title="Evaluation Panel", icon="📏"),
     st.Page(_page_test_panel, title="Test Panel", icon="🧪"),
     st.Page(_page_agent_chat, title="Agent Chat", icon="🤖"),
+    st.Page(_page_research_report, title="Research Report", icon="📈"),
 ]
 
 

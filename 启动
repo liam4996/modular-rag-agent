@@ -16,3 +16,7 @@ python scripts/run_agent.py
 
 
 .venv\Scripts\python.exe scripts/start_dashboard.py
+
+
+# 方式 2: Docker（推荐，零配置）
+docker compose up -d

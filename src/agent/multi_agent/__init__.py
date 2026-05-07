@@ -6,6 +6,8 @@
 - 共享状态（Blackboard Pattern）
 - 容错机制（重试 + 兜底）
 - 溯源与忠实度保证
+- 金融数据 Agent（行情查询）
+- Plan-then-Execute 编排
 """
 
 from .state import AgentState, FallbackReason
@@ -15,6 +17,9 @@ from .web_agent import WebSearchAgent
 from .parallel_controller import ParallelFusionController
 from .eval_agent import EvalAgent, EvaluationResult
 from .refine_agent import RefineAgent, RefinementResult
+from .supervisor_agent import SupervisorAgent
+from .finance_data_agent import FinanceDataAgent
+from .business_compute_agent import BusinessComputeAgent
 from .multi_agent_system import MultiAgentRAG
 from .citation import (
     Citation,
@@ -37,6 +42,9 @@ __all__ = [
     "EvaluationResult",
     "RefineAgent",
     "RefinementResult",
+    "SupervisorAgent",
+    "FinanceDataAgent",
+    "BusinessComputeAgent",
     "MultiAgentRAG",
     "Citation",
     "CitationType",

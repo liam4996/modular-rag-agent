@@ -286,12 +286,14 @@ class ResponseBuilder:
         # References section
         lines.append("\n---\n")
         lines.append("## 引用来源\n")
+        lines.append("> 💡 要查看某条引用的完整原文，请使用 `open_original_document` 工具并传入对应的 `chunk_id`。\n")
         
         for citation in citations:
             source_info = f"`{citation.source}`"
             if citation.page is not None:
                 source_info += f" (p.{citation.page})"
-            lines.append(f"- [{citation.index}] {source_info}")
+            chunk_hint = f"`chunk_id: {citation.chunk_id}`"
+            lines.append(f"- [{citation.index}] {source_info} — {chunk_hint}")
         
         return "\n".join(lines)
     

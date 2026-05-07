@@ -14,6 +14,7 @@ Design Principles:
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -158,27 +159,28 @@ class MultimodalAssembler:
         self.max_images_per_result = max_images_per_result
         self.include_captions = include_captions
     
+    def _deserialize_json_field(
+        self, value: Any, default: Any = None
+    ) -> Any:
+        if isinstance(value, (list, dict)):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return default if default is not None else value
+
     def extract_image_refs(
         self,
         result: RetrievalResult,
     ) -> List[ImageReference]:
-        """Extract image references from a retrieval result.
-        
-        Looks for image references in:
-        1. metadata.images list (structured image info)
-        2. [IMAGE: id] placeholders in text (fallback)
-        
-        Args:
-            result: RetrievalResult containing chunk data.
-            
-        Returns:
-            List of ImageReference objects found in the result.
-        """
         refs: List[ImageReference] = []
         metadata = result.metadata or {}
         
-        # Primary source: structured images list in metadata
-        images_list = metadata.get("images", [])
+        images_list = self._deserialize_json_field(
+            metadata.get("images", []), default=[]
+        )
         if isinstance(images_list, list):
             for img_info in images_list[:self.max_images_per_result]:
                 if isinstance(img_info, dict) and "id" in img_info:
@@ -191,21 +193,27 @@ class MultimodalAssembler:
                     )
                     refs.append(ref)
         
-        # Add captions if available
-        captions = metadata.get("image_captions", {})
-        if isinstance(captions, dict):
+        captions_raw = self._deserialize_json_field(
+            metadata.get("image_captions", {}), default={}
+        )
+        if isinstance(captions_raw, list):
+            captions_dict = {}
+            for c in captions_raw:
+                if isinstance(c, dict) and "id" in c:
+                    captions_dict[c["id"]] = c.get("caption", "")
+            captions_raw = captions_dict
+        if isinstance(captions_raw, dict):
             for ref in refs:
-                if ref.image_id in captions:
-                    ref.caption = captions[ref.image_id]
+                if ref.image_id in captions_raw:
+                    ref.caption = captions_raw[ref.image_id]
         
-        # Fallback: parse placeholders from text if no structured refs
         if not refs and result.text:
             placeholders = IMAGE_PLACEHOLDER_PATTERN.findall(result.text)
             for image_id in placeholders[:self.max_images_per_result]:
                 image_id = image_id.strip()
                 ref = ImageReference(
                     image_id=image_id,
-                    caption=captions.get(image_id) if isinstance(captions, dict) else None,
+                    caption=captions_raw.get(image_id) if isinstance(captions_raw, dict) else None,
                 )
                 refs.append(ref)
         
@@ -215,23 +223,13 @@ class MultimodalAssembler:
         self,
         ref: ImageReference,
         collection: Optional[str] = None,
+        result_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
-        """Resolve the filesystem path for an image reference.
-        
-        Args:
-            ref: ImageReference to resolve.
-            collection: Optional collection name for path construction.
-            
-        Returns:
-            Absolute file path if found, None otherwise.
-        """
-        # Use explicit path if available
         if ref.file_path:
             path = Path(ref.file_path)
             if path.exists():
                 return str(path.resolve())
         
-        # Try ImageStorage lookup
         if self._image_storage is not None:
             try:
                 path = self._image_storage.get_image_path(ref.image_id)
@@ -240,13 +238,21 @@ class MultimodalAssembler:
             except Exception as e:
                 logger.warning(f"ImageStorage lookup failed for {ref.image_id}: {e}")
         
-        # Convention-based path: data/images/{collection}/{image_id}.png
         if collection:
             from src.core.settings import resolve_path
-            for ext in [".png", ".jpg", ".jpeg", ".webp"]:
-                candidate = resolve_path(f"data/images/{collection}/{ref.image_id}{ext}")
-                if candidate.exists():
-                    return str(candidate.resolve())
+            doc_hash = None
+            if result_metadata:
+                doc_hash = result_metadata.get("doc_hash")
+            
+            patterns = [f"data/images/{collection}/{ref.image_id}"]
+            if doc_hash:
+                patterns.append(f"data/images/{collection}/{doc_hash}/{ref.image_id}")
+            
+            for base in patterns:
+                for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+                    candidate = resolve_path(f"{base}{ext}")
+                    if candidate.exists():
+                        return str(candidate.resolve())
         
         return None
     
@@ -323,41 +329,27 @@ class MultimodalAssembler:
         result: RetrievalResult,
         collection: Optional[str] = None,
     ) -> List[Union[types.TextContent, types.ImageContent]]:
-        """Assemble multimodal content blocks for a single result.
-        
-        Args:
-            result: RetrievalResult to process.
-            collection: Optional collection name for path resolution.
-            
-        Returns:
-            List of MCP content blocks (TextContent and ImageContent).
-        """
         blocks: List[Union[types.TextContent, types.ImageContent]] = []
         
-        # Extract image references
         refs = self.extract_image_refs(result)
         
-        # Load and add images
         for ref in refs:
-            # Resolve path
-            file_path = self.resolve_image_path(ref, collection)
+            file_path = self.resolve_image_path(
+                ref, collection, result_metadata=result.metadata
+            )
             if not file_path:
                 logger.debug(f"Could not resolve path for image: {ref.image_id}")
                 continue
             
-            # Load image
             image_content = self.load_image(file_path)
             if image_content is None:
                 continue
             
-            # Update with reference info
             image_content.image_id = ref.image_id
             image_content.caption = ref.caption
             
-            # Add image block
             blocks.append(image_content.to_mcp_content())
             
-            # Add caption as text if enabled
             if self.include_captions and ref.caption:
                 caption_text = f"**Image Caption ({ref.image_id}):** {ref.caption}"
                 blocks.append(types.TextContent(type="text", text=caption_text))

@@ -15,6 +15,7 @@ Design Principles:
 """
 
 import hashlib
+import json
 from typing import List, Dict, Any, Optional
 
 from src.core.types import Chunk
@@ -116,13 +117,25 @@ class VectorUpserter:
             chunk_ids.append(chunk_id)
             
             # Build storage record
+            # JSON-serialize complex metadata fields for ChromaDB compatibility
+            # ChromaStore._sanitize_metadata corrupts list/dict values, so we
+            # serialize them here and deserialize after retrieval.
+            serializable_metadata = dict(chunk.metadata)
+            for _key in ("images", "image_captions"):
+                if _key in serializable_metadata and not isinstance(
+                    serializable_metadata[_key], (str, int, float, bool)
+                ):
+                    serializable_metadata[_key] = json.dumps(
+                        serializable_metadata[_key], ensure_ascii=False
+                    )
+
             record = {
                 "id": chunk_id,
                 "vector": vector,
                 "metadata": {
-                    **chunk.metadata,  # Preserve all original metadata
-                    "text": chunk.text,  # Store text for retrieval
-                    "chunk_id": chunk_id,  # Redundant but useful for queries
+                    **serializable_metadata,
+                    "text": chunk.text,
+                    "chunk_id": chunk_id,
                 },
             }
             records.append(record)

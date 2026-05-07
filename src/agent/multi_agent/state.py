@@ -73,6 +73,9 @@ class AgentState:
     # ========== 输出部分 ==========
     # 最终生成的回答
     final_answer: str = ""
+
+    # ========== 金融研报分析日期 ==========
+    analysis_date: Optional[str] = None
     
     # ========== 只读属性 ==========
     @property
@@ -99,6 +102,32 @@ class AgentState:
     def refined_query(self) -> str:
         """获取优化后的查询"""
         return self.blackboard.get("refined_query", self.user_input)
+    
+    # ========== 金融场景新增属性 ==========
+    @property
+    def task_plan(self) -> Dict:
+        return self.blackboard.get("task_plan", {})
+    
+    @property
+    def market_data(self) -> Dict:
+        return self.blackboard.get("market_data", {})
+    
+    @property
+    def computed_results(self) -> Dict:
+        return self.blackboard.get("computed_results", {})
+    
+    @property
+    def chart_paths(self) -> List[str]:
+        return self.blackboard.get("chart_paths", [])
+    
+    @property
+    def generated_report(self) -> Optional[str]:
+        return self.blackboard.get("generated_report")
+    
+    @property
+    def is_financial_intent(self) -> bool:
+        intent = self.blackboard.get("intent", "")
+        return intent.startswith("financial_")
     
     @property
     def should_fallback(self) -> bool:
@@ -167,6 +196,34 @@ class AgentState:
         Args:
             step: 执行步骤信息
         """
+        from datetime import datetime
+        step.setdefault("status", "done")
+        step.setdefault("description", "")
+        step.setdefault("timestamp", datetime.now().isoformat())
+        self.execution_trace.append(step)
+    
+    def add_thinking_step(self, agent: str, action: str,
+                           description: str = "", status: str = "running",
+                           details: Optional[Dict] = None):
+        """
+        添加一个思考过程步骤，用于流式展示。
+        
+        Args:
+            agent: Agent 名称
+            action: 执行的动作
+            description: 用户友好的过程描述
+            status: "running" | "done" | "error"
+            details: 额外数据
+        """
+        from datetime import datetime
+        step = {
+            "agent": agent,
+            "action": action,
+            "status": status,
+            "description": description,
+            "timestamp": datetime.now().isoformat(),
+            "details": details or {},
+        }
         self.execution_trace.append(step)
     
     def add_metric(self, key: str, value: Any):

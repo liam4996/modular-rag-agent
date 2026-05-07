@@ -206,6 +206,14 @@ def _register_default_tools(protocol_handler: ProtocolHandler) -> None:
     # Import and register get_document_summary tool
     from src.mcp_server.tools.get_document_summary import register_tool as register_summary_tool
     register_summary_tool(protocol_handler)
+    
+    # Import and register open_original_document tool
+    from src.mcp_server.tools.open_original_document import register_tool as register_open_doc_tool
+    register_open_doc_tool(protocol_handler)
+    
+    # Import and register query_market_data tool
+    from src.mcp_server.tools.query_market_data import register_tool as register_market_tool
+    register_market_tool(protocol_handler)
 
 
 def create_mcp_server(
