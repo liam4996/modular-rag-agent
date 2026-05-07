@@ -13,6 +13,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Start the Modular RAG Dashboard")

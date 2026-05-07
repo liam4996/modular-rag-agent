@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from enum import Enum
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models import BaseLLM
-import json
+
+from .tools.json_parser import safe_parse_json_with_default
 
 
 class AgentType(Enum):
@@ -23,6 +24,8 @@ class AgentType(Enum):
     EVAL = "eval"
     REFINE = "refine"
     GENERATE = "generate"
+    FINANCE_DATA = "finance_data"
+    FINANCE_COMPUTE = "finance_compute"
 
 
 @dataclass
@@ -75,6 +78,13 @@ Classify the user query into FOUR dimensions:
    - summarization: asks to summarize a paper, file, report, or document
    - comparison: compare two methods / products / documents / viewpoints
    - analysis: asks for deeper judgment, evaluation, recommendation, tradeoff analysis
+   - financial_analysis: asks to analyze financial reports, stock performance, company fundamentals,
+     or make investment/trading judgments (signals: "分析财报", "PE", "ROE", "毛利率", "估值",
+     "投资价值", "行业对比", "财务指标", "营收", "利润", "K线", "行情")
+   - financial_market: asks for real-time market data, stock prices, or market indices
+     (signals: "股价", "涨跌", "市值", "换手率", "市盈率", "市净率", "港股", "美股", "大盘")
+   - financial_report: asks to generate a structured financial report or visualization
+     (signals: "生成报告", "画图", "可视化", "K线图", "对比图", "图表", "出具报告")
    - unknown: impossible or unclear request
 
 2. needs_local
@@ -89,6 +99,7 @@ Classify the user query into FOUR dimensions:
    - simple: single-hop, direct answer likely enough
    - medium: may need synthesis or comparison, but usually one retrieval round is enough
    - complex: multi-step reasoning, comparison + judgment, planning, or local + web synthesis
+   - financial financial_* intents are almost always "complex"
 
 Routing guidance:
 - chat usually means needs_local=false and needs_web=false
@@ -96,6 +107,9 @@ Routing guidance:
 - latest/public/current/trend/comparison with outside world often means needs_web=true
 - if the query explicitly asks to combine internal/local docs with web/public/latest info, set both needs_local=true and needs_web=true
 - comparison / analysis involving "latest", "industry", "public", "research progress" is often complex
+- financial_analysis: set needs_local=true, complexity=complex, agents=["SearchAgent", "FinanceDataAgent"]
+- financial_market: set needs_web=true, complexity=simple, agents=["FinanceDataAgent"]
+- financial_report: set needs_local=true, complexity=complex, agents=["SearchAgent", "FinanceDataAgent"]
 
 Respond ONLY in JSON:
 {{
@@ -161,37 +175,18 @@ Respond ONLY in JSON:
         )
     
     def _parse_response(self, content: str) -> Dict:
-        """
-        解析 LLM 响应
-        
-        Args:
-            content: LLM 返回的文本内容
-            
-        Returns:
-            解析后的字典
-        """
-        try:
-            # 尝试直接解析 JSON
-            return json.loads(content)
-        except json.JSONDecodeError:
-            # 尝试提取 JSON 部分
-            import re
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-            
-            # 如果还是失败，返回默认值
-            return {
-                "intent": "unknown",
-                "needs_local": False,
-                "needs_web": False,
-                "complexity": "simple",
-                "agents_to_invoke": [],
-                "parallel": False,
-                "confidence": 0.0,
-                "reasoning": "Failed to parse response",
-                "parameters": {}
-            }
+        """解析 LLM 响应为字典"""
+        return safe_parse_json_with_default(content, {
+            "intent": "unknown",
+            "needs_local": False,
+            "needs_web": False,
+            "complexity": "simple",
+            "agents_to_invoke": [],
+            "parallel": False,
+            "confidence": 0.0,
+            "reasoning": "Failed to parse response",
+            "parameters": {}
+        })
 
     def _build_agents_to_invoke(self, result: Dict[str, Any]) -> List[AgentType]:
         """Build invoked agents from explicit source flags, with backward compatibility."""

@@ -3211,4 +3211,29 @@ RAG 系统的上限取决于其对特定业务数据的理解深度。未来的�
 
 这种演进方向将把本项目从一个“智能搜索引擎”升级为一个“智能研究助理”的基础设施底座。
 
+---
+
+## 更新日志
+
+### 2026-04-30：图文联动修复 & Agent 图片返回
+
+#### 问题
+系统设计了完整的图文链路（ImageCaptioner + MultimodalAssembler），但实际端到端存在三个断点：
+1. `ChromaStore._sanitize_metadata()` 将 `images: List[Dict]` 拍平为逗号分隔字符串，导致 MultimodalAssembler 无法解析
+2. `resolve_image_path()` 未尝试 `data/images/{collection}/{doc_hash}/` 子目录，图片找不到
+3. SimpleAgent / SearchAgent 格式化结果时丢弃了 `images` 字段，AgentResponse 不携带图片
+
+#### 修改
+
+| 文件 | 修改 |
+|------|------|
+| `src/ingestion/storage/vector_upserter.py` | 存储前将 `images`/`image_captions` JSON 序列化 |
+| `src/core/response/multimodal_assembler.py` | 新增 `_deserialize_json_field()`；`resolve_image_path()` 增加 `doc_hash` 路径；传递 metadata |
+| `src/agent/tool_caller.py` | 格式化结果保留 `images`/`image_refs`/`doc_hash`/`source_path` |
+| `src/agent/multi_agent/search_agent.py` | 同上 |
+| `src/agent/simple_agent.py` | `AgentResponse.image_data`；`_extract_images_from_results()` |
+| `src/agent/intent_classifier.py` | Fallback 新增图片关键词 |
+| `src/observability/dashboard/pages/agent_chat.py` | 图像提取 + inline 渲染 |
+| `pyproject.toml` | 新增 `PyMuPDF>=1.23.0` |
+
 

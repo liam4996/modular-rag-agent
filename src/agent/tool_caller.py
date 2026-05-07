@@ -26,6 +26,7 @@ class ToolName(Enum):
     QUERY_KNOWLEDGE_HUB = "query_knowledge_hub"
     LIST_COLLECTIONS = "list_collections"
     GET_DOCUMENT_SUMMARY = "get_document_summary"
+    OPEN_ORIGINAL_DOCUMENT = "open_original_document"
 
 
 @dataclass
@@ -173,6 +174,10 @@ class QueryKnowledgeHubTool(BaseTool):
                     "score": doc.score,
                     "source": source,
                     "chunk_index": meta.get("chunk_index", -1),
+                    "images": meta.get("images"),
+                    "image_refs": meta.get("image_refs"),
+                    "doc_hash": meta.get("doc_hash"),
+                    "source_path": meta.get("source_path"),
                 })
             
             return ToolResult(
@@ -336,6 +341,76 @@ class GetDocumentSummaryTool(BaseTool):
             )
 
 
+class OpenOriginalDocumentTool(BaseTool):
+    """Tool for opening and viewing the full original document from a citation."""
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        from src.libs.vector_store.vector_store_factory import VectorStoreFactory
+        self.vector_store = VectorStoreFactory.create(settings)
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=ToolName.OPEN_ORIGINAL_DOCUMENT.value,
+            description=(
+                "Open and view the full original document from a citation source. "
+                "Given a chunk_id (from search result citations), returns the complete "
+                "document content with the target chunk highlighted."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "chunk_id": {
+                        "type": "string",
+                        "description": "The chunk ID from a citation reference",
+                    },
+                    "doc_hash": {
+                        "type": "string",
+                        "description": "Alternative: the document hash directly",
+                    },
+                    "collection": {
+                        "type": "string",
+                        "description": "Collection name (default: 'default')",
+                    },
+                },
+            },
+            required=[],
+        )
+
+    def execute(
+        self,
+        chunk_id: Optional[str] = None,
+        doc_hash: Optional[str] = None,
+        collection: Optional[str] = None,
+        **kwargs,
+    ) -> ToolResult:
+        try:
+            from src.mcp_server.tools.open_original_document import (
+                OpenOriginalDocumentTool as MCPOpenDocTool,
+            )
+            tool = MCPOpenDocTool(settings=self.settings)
+            result = tool.get_document_content(
+                chunk_id=chunk_id,
+                doc_hash=doc_hash,
+                collection=collection,
+            )
+            return ToolResult(
+                success=True,
+                data={
+                    "title": result["title"],
+                    "total_chunks": result["total_chunks"],
+                    "total_chars": result["total_chars"],
+                    "source_path": result["source_path"],
+                    "doc_hash": result["doc_hash"],
+                    "highlighted_chunks": result["highlighted_chunks"],
+                    "truncated": result["truncated"],
+                },
+            )
+        except Exception as e:
+            return ToolResult(success=False, data=None, error=str(e))
+
+
 class ToolRegistry:
     """Registry for managing available tools."""
     
@@ -354,6 +429,7 @@ class ToolRegistry:
         self.register(QueryKnowledgeHubTool(self.settings))
         self.register(ListCollectionsTool(self.settings))
         self.register(GetDocumentSummaryTool(self.settings))
+        self.register(OpenOriginalDocumentTool(self.settings))
     
     def register(self, tool: BaseTool) -> None:
         """Register a tool.

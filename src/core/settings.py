@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+import os
 import yaml
 
 # ---------------------------------------------------------------------------
@@ -16,6 +17,29 @@ REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 
 # Default absolute path to settings.yaml
 DEFAULT_SETTINGS_PATH: Path = REPO_ROOT / "config" / "settings.yaml"
+
+# API Key 占位符标记 — 以 __ 开头和结尾的视为占位符
+_API_KEY_PLACEHOLDER_PREFIX = "__"
+_API_KEY_PLACEHOLDER_SUFFIX = "__"
+
+
+def _resolve_api_key(yaml_value: Optional[str], env_var_name: str) -> Optional[str]:
+    """从 YAML 读取 API Key，如果是占位符则回退到环境变量。
+
+    Args:
+        yaml_value: settings.yaml 中的值
+        env_var_name: 环境变量名称，如 "OPENAI_API_KEY"
+
+    Returns:
+        解析后的 API Key，如果都未设置则返回 None
+    """
+    if yaml_value and not (yaml_value.startswith(_API_KEY_PLACEHOLDER_PREFIX) and
+                            yaml_value.endswith(_API_KEY_PLACEHOLDER_SUFFIX)):
+        return yaml_value
+    env_value = os.getenv(env_var_name)
+    if env_value:
+        return env_value
+    return yaml_value
 
 
 def resolve_path(relative: Union[str, Path]) -> Path:
@@ -232,7 +256,7 @@ class Settings:
                 provider=_require_str(vision_llm, "provider", "vision_llm"),
                 model=_require_str(vision_llm, "model", "vision_llm"),
                 max_image_size=_require_int(vision_llm, "max_image_size", "vision_llm"),
-                api_key=vision_llm.get("api_key"),
+                api_key=_resolve_api_key(vision_llm.get("api_key"), "OPENAI_API_KEY"),
                 api_version=vision_llm.get("api_version"),
                 azure_endpoint=vision_llm.get("azure_endpoint"),
                 deployment_name=vision_llm.get("deployment_name"),
@@ -256,7 +280,7 @@ class Settings:
                 model=_require_str(llm, "model", "llm"),
                 temperature=_require_number(llm, "temperature", "llm"),
                 max_tokens=_require_int(llm, "max_tokens", "llm"),
-                api_key=llm.get("api_key"),
+                api_key=_resolve_api_key(llm.get("api_key"), "OPENAI_API_KEY"),
                 api_version=llm.get("api_version"),
                 azure_endpoint=llm.get("azure_endpoint"),
                 deployment_name=llm.get("deployment_name"),
@@ -266,7 +290,7 @@ class Settings:
                 provider=_require_str(embedding, "provider", "embedding"),
                 model=_require_str(embedding, "model", "embedding"),
                 dimensions=_require_int(embedding, "dimensions", "embedding"),
-                api_key=embedding.get("api_key"),
+                api_key=_resolve_api_key(embedding.get("api_key"), "OPENAI_API_KEY"),
                 api_version=embedding.get("api_version"),
                 azure_endpoint=embedding.get("azure_endpoint"),
                 deployment_name=embedding.get("deployment_name"),

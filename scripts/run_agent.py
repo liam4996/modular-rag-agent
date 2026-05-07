@@ -127,6 +127,14 @@ def interactive_mode(agent: SimpleAgent, verbose: bool = False):
                 print(f"   意图: {response.intent.value}")
                 print(f"   置信度: {response.confidence:.2f}")
                 print(f"   调用工具: {response.tool_called or '无'}")
+                if response.image_data:
+                    print(f"   包含图片: {len(response.image_data)} 张")
+                    for img in response.image_data:
+                        caption = img.get("caption", "")
+                        print(f"     - {img.get('image_id', '?')}  "
+                              f"({img.get('mime_type', '?')}, "
+                              f"{len(img.get('data', ''))} bytes)"
+                              + (f" 描述: {caption[:80]}" if caption else ""))
                 
         except KeyboardInterrupt:
             print("\n\n👋 再见!")
@@ -154,6 +162,14 @@ def single_query(agent: SimpleAgent, query: str, verbose: bool = False):
         print(f"   意图: {response.intent.value}")
         print(f"   置信度: {response.confidence:.2f}")
         print(f"   调用工具: {response.tool_called or '无'}")
+        if response.image_data:
+            print(f"   包含图片: {len(response.image_data)} 张")
+            for img in response.image_data:
+                caption = img.get("caption", "")
+                print(f"     - {img.get('image_id', '?')}  "
+                      f"({img.get('mime_type', '?')}, "
+                      f"{len(img.get('data', ''))} bytes)"
+                      + (f"  描述: {caption[:80]}" if caption else ""))
 
 
 def main():

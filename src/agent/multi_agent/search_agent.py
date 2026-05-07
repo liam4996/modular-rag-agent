@@ -96,6 +96,10 @@ class SearchAgent:
                 "score": item.get("score", 0.0),
                 "source": item.get("source", "unknown"),
                 "chunk_index": item.get("chunk_index", -1),
+                "images": item.get("images"),
+                "image_refs": item.get("image_refs"),
+                "doc_hash": item.get("doc_hash"),
+                "source_path": item.get("source_path"),
                 "metadata": {
                     "type": "local",
                     "dense_sparse_fusion": True,

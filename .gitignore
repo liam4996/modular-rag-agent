@@ -25,6 +25,7 @@ venv/
 ENV/
 env/
 .venv/
+.conda/
 
 # IDE
 .vscode/
@@ -32,6 +33,8 @@ env/
 *.swp
 *.swo
 *~
+.trae/
+.cursor/
 
 # Environment Variables
 .env
@@ -42,6 +45,8 @@ env/
 data/db/
 data/raw/
 data/memory/
+data/charts/
+data/reports/
 *.db
 *.sqlite
 *.sqlite3
@@ -54,15 +59,14 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Test coverage
+# Test & Coverage
 .coverage
 htmlcov/
 .pytest_cache/
-
-# MyPy
 .mypy_cache/
 .dmypy.json
 dmypy.json
+*.coverage
 
 # Temporary test/diagnostic scripts (root only)
 /test_*.py
@@ -72,12 +76,14 @@ dmypy.json
 # Generated images
 Generated_image.png
 
-# IDE specific
-.trae/
-.cursor/
-
 # User notes
 [ User Query ].txt
 
 # Resume skills (personal)
 resume-skills/
+
+# Docker
+.dockerignore
+
+# Docs temp
+*.tmp

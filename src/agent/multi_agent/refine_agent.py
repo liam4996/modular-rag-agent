@@ -13,6 +13,8 @@ from langchain_core.language_models import BaseLLM
 from langchain_core.prompts import ChatPromptTemplate
 import json
 
+from .tools.json_parser import safe_parse_json_with_default
+
 from .eval_agent import EvaluationResult
 
 
@@ -174,10 +176,6 @@ Respond in JSON format:
     
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
         """解析 LLM 的 JSON 响应"""
-        import re
-        json_match = re.search(r'\{[\s\S]*\}', response)
-        if json_match:
-            json_str = json_match.group(0)
-            return json.loads(json_str)
-        else:
-            return json.loads(response)
+        return safe_parse_json_with_default(response, {
+            "refined_query": "", "changes_made": [], "reasoning": "parse error",
+        })

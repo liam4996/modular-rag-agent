@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  dashboard:
+    build: .
+    container_name: modular-rag-dashboard
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    environment:
+      - TUSHARE_API_TOKEN=${TUSHARE_API_TOKEN:-}
+    command: streamlit run src/observability/dashboard/app.py --server.port=8501 --server.address=0.0.0.0
+    restart: unless-stopped
+
+  mcp-server:
+    build: .
+    container_name: modular-rag-mcp
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    environment:
+      - TUSHARE_API_TOKEN=${TUSHARE_API_TOKEN:-}
+    command: python -m main
+    restart: unless-stopped

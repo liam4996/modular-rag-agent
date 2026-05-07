@@ -225,6 +225,54 @@ def _ingest_uploaded_file(
 # Query Processing
 # ═══════════════════════════════════════════════════════════════
 
+def _extract_images_from_local_results(
+    local_results: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """从检索结果中提取图片数据，编码为 base64。
+
+    Args:
+        local_results: 格式化后的检索结果列表（含 images 字段）
+
+    Returns:
+        List[Dict] 每个元素含 data/base64、mime_type、caption、image_id
+    """
+    import json
+    from pathlib import Path
+    from src.core.response.multimodal_assembler import MultimodalAssembler
+
+    assembler = MultimodalAssembler()
+    image_data: List[Dict[str, str]] = []
+    seen_paths: set = set()
+
+    for item in local_results:
+        raw_images = item.get("images")
+        if not raw_images:
+            continue
+        try:
+            images_list = (
+                json.loads(raw_images) if isinstance(raw_images, str) else raw_images
+            )
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for img_info in images_list:
+            file_path = img_info.get("path")
+            if not file_path or file_path in seen_paths:
+                continue
+            seen_paths.add(file_path)
+            p = Path(file_path)
+            resolved = str(p.resolve()) if p.exists() else None
+            if resolved:
+                img = assembler.load_image(resolved)
+                if img:
+                    image_data.append({
+                        "data": img.data,
+                        "mime_type": img.mime_type,
+                        "caption": img.caption or "",
+                        "image_id": img.image_id,
+                    })
+    return image_data
+
+
 def process_query(query: str, config: Dict[str, Any]) -> Dict[str, Any]:
     agent = get_agent()
     if not agent:
@@ -233,9 +281,107 @@ def process_query(query: str, config: Dict[str, Any]) -> Dict[str, Any]:
     try:
         start_time = time.time()
         conversation_history = _build_conversation_history()
-        final_state = agent.run(
-            user_input=query, conversation_history=conversation_history
-        )
+        answer_mode = config.get("answer_mode", "agentic")
+
+        if answer_mode == "baseline_rag":
+            # Baseline RAG: single local retrieve + single-shot generation (no plan/eval/refine/web loop)
+            local_results = agent.search_agent.search(
+                query=query,
+                top_k=int(config.get("top_k", 5)),
+                context=conversation_history,
+            )
+            baseline_context = {
+                "user_input": query,
+                "conversation_history": conversation_history,
+                "local_results": local_results,
+                "web_results": [],
+                "evaluation": {},
+                "blackboard": {"plan_observations": []},
+            }
+            answer, citations, _faithfulness = agent._generate_normal_response_with_citations(  # noqa: SLF001
+                baseline_context
+            )
+            final_state = {
+                "final_answer": answer,
+                "blackboard": {
+                    "local_results": local_results,
+                    "web_results": [],
+                    "citations": [c.to_dict() for c in citations],
+                    "evaluation": {"confidence": 0.0, "mode": "baseline_rag"},
+                },
+                "execution_trace": [
+                    {"agent": "baseline_rag", "action": "local_retrieve", "result_count": len(local_results)},
+                    {"agent": "baseline_rag", "action": "generate_once", "citation_count": len(citations)},
+                ],
+            }
+        elif answer_mode == "retrieval_only":
+            # Agentic retrieval-only: router/plan/retrieve/read/eval, but NO LLM generation.
+            state = AgentState(user_input=query, conversation_history=conversation_history)
+
+            # Use the same internal nodes as agentic flow, but stop after eval.
+            state = agent._router_node(state)  # noqa: SLF001
+            if state.blackboard.get("query_complexity") == "complex":
+                state = agent._plan_node(state)  # noqa: SLF001
+            if not state.blackboard.get("plan_complete", False):
+                state = agent._retrieve_node(state)  # noqa: SLF001
+                state = agent._read_node(state)  # noqa: SLF001
+                state = agent._eval_node(state)  # noqa: SLF001
+
+            local_results = state.blackboard.get("local_results", [])
+            web_results = state.blackboard.get("web_results", [])
+
+            citations = CitationManager.create_citations_from_results(
+                local_results=local_results,
+                web_results=web_results,
+                top_k=5,
+            )
+
+            parts: list[str] = []
+            parts.append("## Retrieval only（不生成回答）")
+            eval_data = state.blackboard.get("evaluation", {})
+            if eval_data:
+                parts.append(
+                    f"- **Eval confidence**: {eval_data.get('confidence', 0):.2f}\n"
+                    f"- **Relevance**: {eval_data.get('relevance', 0):.2f}\n"
+                    f"- **Need refinement**: {eval_data.get('need_refinement', False)}\n"
+                    f"- **Reason**: {eval_data.get('reason', '')}"
+                )
+
+            if local_results:
+                parts.append("\n## 本地知识库片段（Top）")
+                for i, r in enumerate(local_results[: min(len(local_results), int(config.get('top_k', 5)))], 1):
+                    src = r.get("source", "unknown")
+                    score = r.get("score", 0)
+                    content = (r.get("content", "") or "").strip()
+                    parts.append(f"**Local {i}** · `{src}` · score={score:.3f}\n\n{content[:800]}")
+
+            if web_results:
+                parts.append("\n## 联网片段（Top）")
+                for i, r in enumerate(web_results[:3], 1):
+                    title = r.get("title", "")
+                    url = r.get("url", "")
+                    snippet = (r.get("snippet", r.get("content", "")) or "").strip()
+                    parts.append(f"**Web {i}** · `{title}` · `{url}`\n\n{snippet[:800]}")
+
+            if not local_results and not web_results:
+                parts.append("\n未检索到任何结果。")
+
+            answer = "\n\n".join(parts)
+
+            final_state = {
+                "final_answer": answer,
+                "blackboard": {
+                    "local_results": local_results,
+                    "web_results": web_results,
+                    "citations": [c.to_dict() for c in citations],
+                    "evaluation": state.blackboard.get("evaluation", {}),
+                },
+                "execution_trace": state.execution_trace,
+            }
+        else:
+            final_state = agent.run(
+                user_input=query, conversation_history=conversation_history
+            )
 
         if isinstance(final_state, dict):
             answer = final_state.get("final_answer", "")
@@ -261,12 +407,16 @@ def process_query(query: str, config: Dict[str, Any]) -> Dict[str, Any]:
             "total_time": elapsed,
         }
 
+        image_data = _extract_images_from_local_results(local_results)
+
         return {
             "success": bool(answer),
             "answer": answer or "抱歉，我暂时无法回答这个问题。",
             "citations": citations or [],
             "execution_trace": execution_trace,
+            "thinking_process": execution_trace,
             "metrics": metrics,
+            "image_data": image_data,
             "state": final_state,
         }
     except Exception as e:
@@ -284,7 +434,6 @@ def display_chat_message(message: Dict[str, Any]) -> None:
 
     if role == "user":
         with st.chat_message("user"):
-            # Show attached file names if present
             if message.get("attached_files"):
                 file_tags = " ".join(
                     f"`📎 {f}`" for f in message["attached_files"]
@@ -294,6 +443,61 @@ def display_chat_message(message: Dict[str, Any]) -> None:
     elif role == "assistant":
         with st.chat_message("assistant"):
             st.markdown(content)
+
+            # 🆕 思考过程 toggle (默认收起)
+            thinking_process = message.get("thinking_process", [])
+            if thinking_process:
+                with st.expander("🧠 展示推理过程", expanded=False):
+                    agent_icons = {
+                        "router": "🎯", "RouterAgent": "🎯", "supervisor": "🎯",
+                        "search": "🔍", "SearchAgent": "🔍", "RAG": "🔍",
+                        "web": "🌐", "WebAgent": "🌐",
+                        "eval": "📏", "EvalAgent": "📏",
+                        "refine": "✨", "RefineAgent": "✨",
+                        "generate": "✍️", "GenerateAgent": "✍️",
+                        "finance_data": "💰", "FinanceData": "💰", "FinanceDataAgent": "💰",
+                        "business_compute": "📊", "BusinessCompute": "📊",
+                        "conflict": "⚠️", "ConflictDetector": "⚠️",
+                        "ChartCritic": "🎨", "chart_critic": "🎨",
+                        "System": "⚙️",
+                    }
+                    for step in thinking_process:
+                        agent = step.get("agent", "")
+                        action = step.get("action", "")
+                        icon = agent_icons.get(agent, "🤖")
+                        status = step.get("status", "done")
+                        description = step.get("description", action)
+
+                        if status == "running":
+                            st.markdown(f"{icon} **{agent}** → {description} ⏳")
+                        elif status == "done":
+                            st.markdown(f"{icon} ✅ **{agent}** → {description}")
+                        elif status == "error":
+                            st.markdown(f"{icon} ❌ **{agent}** → {description}")
+
+                        detail = {k: v for k, v in step.items()
+                                  if k not in ("agent", "action", "status", "description", "timestamp")}
+                        if detail:
+                            with st.expander("详情", expanded=False):
+                                st.json(detail)
+
+            if "image_data" in message and message["image_data"]:
+                with st.expander("🖼️ 图片内容", expanded=True):
+                    cols = st.columns(min(len(message["image_data"]), 3))
+                    for i, img in enumerate(message["image_data"]):
+                        import base64
+                        col = cols[i % 3]
+                        b64 = img.get("data", "")
+                        mime = img.get("mime_type", "image/png")
+                        caption = img.get("caption", "")
+                        if b64:
+                            col.markdown(
+                                f'<img src="data:{mime};base64,{b64}" '
+                                f'style="max-width:100%;border-radius:8px;">',
+                                unsafe_allow_html=True,
+                            )
+                            if caption:
+                                col.caption(caption[:120])
 
             if "citations" in message and message["citations"]:
                 with st.expander("📚 查看引用来源", expanded=False):
@@ -377,6 +581,20 @@ def render() -> None:
     # ── Sidebar ────────────────────────────────────────────────
     with st.sidebar:
         st.subheader("⚙️ 配置")
+        answer_mode = st.selectbox(
+            "Answer mode",
+            options=[
+                "agentic",
+                "baseline_rag",
+                "retrieval_only",
+            ],
+            index=0,
+            help=(
+                "agentic = 多智能体闭环（plan/read/eval/refine/web/generate）\n"
+                "baseline_rag = 普通 RAG（仅本地检索 + 单次生成，不做多步循环）\n"
+                "retrieval_only = 仅检索（走 agentic 的检索/反思，但不让 LLM 生成最终答案）"
+            ),
+        )
         routing_mode = st.selectbox(
             "路由模式",
             options=["auto", "local_search", "web_search", "hybrid_search"],
@@ -495,7 +713,7 @@ def render() -> None:
         st.session_state.chat_history.append(user_msg)
         _get_compaction_memory().add("user", prompt)
 
-        config = {"routing_mode": routing_mode, "top_k": top_k}
+        config = {"routing_mode": routing_mode, "top_k": top_k, "answer_mode": answer_mode}
 
         with st.chat_message("assistant"):
             with st.spinner("正在思考..."):
@@ -507,6 +725,8 @@ def render() -> None:
                 "content": response["answer"],
                 "citations": response["citations"],
                 "metrics": response["metrics"],
+                "image_data": response.get("image_data", []),
+                "thinking_process": response.get("thinking_process", []),
             }
             st.session_state.chat_history.append(assistant_message)
             st.session_state.execution_traces.extend(response["execution_trace"])

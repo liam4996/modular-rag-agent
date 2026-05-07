@@ -40,6 +40,10 @@ dependencies = [
     "tavily-python>=0.7.0",
     "duckduckgo-search>=6.0",
     "langchain-openai>=0.2.0",
+    "PyMuPDF>=1.23.0",
+    "akshare>=1.14.0",
+    "yfinance>=0.2.4",
+    "tushare>=1.4.0",
 ]
 
 [project.optional-dependencies]

@@ -24,6 +24,7 @@ class Citation:
         page: Page number in source document (if applicable)
         score: Relevance score from retrieval
         text_snippet: Short excerpt from the referenced content
+        doc_hash: Document hash for full document retrieval
         metadata: Additional metadata (title, section, etc.)
     """
     index: int
@@ -32,6 +33,7 @@ class Citation:
     score: float
     text_snippet: str
     page: Optional[int] = None
+    doc_hash: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
@@ -45,9 +47,21 @@ class Citation:
         }
         if self.page is not None:
             result["page"] = self.page
+        if self.doc_hash is not None:
+            result["doc_hash"] = self.doc_hash
         if self.metadata:
             result["metadata"] = self.metadata
         return result
+
+    def tool_call_hint(self) -> str:
+        """Generate a hint for calling open_original_document tool.
+
+        Returns a formatted string that AI assistants can use to call the tool.
+        """
+        return (
+            f'open_original_document(chunk_id="{self.chunk_id}", '
+            f'doc_hash="{self.doc_hash}")'
+        )
 
 
 class CitationGenerator:
@@ -124,10 +138,13 @@ class CitationGenerator:
         # Generate text snippet
         text_snippet = self._generate_snippet(result.text)
         
+        # Extract doc_hash from metadata
+        doc_hash = metadata.get("doc_hash", metadata.get("source_ref", None))
+        
         # Extract selected metadata fields
         extra_metadata = {}
         for field_name in self.include_metadata_fields:
-            if field_name in metadata and field_name not in ("source_path", "page", "page_num"):
+            if field_name in metadata and field_name not in ("source_path", "page", "page_num", "doc_hash", "source_ref"):
                 extra_metadata[field_name] = metadata[field_name]
         
         return Citation(
@@ -137,6 +154,7 @@ class CitationGenerator:
             score=result.score,
             text_snippet=text_snippet,
             page=page,
+            doc_hash=doc_hash,
             metadata=extra_metadata,
         )
     
