@@ -10,9 +10,8 @@ llm:
   deployment_name: ""
   azure_endpoint: ""
   api_version: ""
-  # 使用环境变量 OPENAI_API_KEY，或在此填写（勿提交到 Git）
-  api_key: ""
-  base_url: "https://api.openai.com/v1"
+  api_key: "sk-KpZOSax2jsyVR4Q64sob3W2cwypG4u2OKK6jYFSSuG0EYoXj"
+  base_url: "https://api.openai-proxy.org/v1"
   temperature: 0.0
   max_tokens: 4096
 
@@ -26,8 +25,8 @@ embedding:
   azure_endpoint: ""
   deployment_name: ""
   api_version: ""
-  api_key: ""
-  base_url: "https://api.openai.com/v1"
+  api_key: "sk-KpZOSax2jsyVR4Q64sob3W2cwypG4u2OKK6jYFSSuG0EYoXj"
+  base_url: "https://api.openai-proxy.org/v1"
 
 # =============================================================================
 # Vision LLM Configuration (for Image Captioning)
@@ -39,8 +38,8 @@ vision_llm:
   azure_endpoint: ""
   deployment_name: ""
   api_version: ""
-  api_key: ""
-  base_url: "https://api.openai.com/v1"
+  api_key: "sk-KpZOSax2jsyVR4Q64sob3W2cwypG4u2OKK6jYFSSuG0EYoXj"
+  base_url: "https://api.openai-proxy.org/v1"
   max_image_size: 2048
 
 # =============================================================================
@@ -103,15 +102,10 @@ ingestion:
 
 # =============================================================================
 # Web Search Configuration (Tavily recommended for China)
-# Get free API key: https://app.tavily.com (1000 searches/month free)
 # =============================================================================
 web_search:
   engine: "tavily"
-  # 使用环境变量 TAVILY_API_KEY，或在此填写（勿提交到 Git）
   tavily_api_key: ""
-  # google_api_key: ""
-  # google_search_engine_id: ""
-  # bing_api_key: ""
 
 # =============================================================================
 # Agent Configuration
@@ -141,3 +135,23 @@ security:
   allowed_hosts:
     - "localhost"
     - "127.0.0.1"
+
+# =============================================================================
+# Finance Agent Configuration (NEW — Phase 1)
+# =============================================================================
+finance:
+  market_data:
+    a_share:
+      provider: "akshare"
+      enabled: true
+    us_hk:
+      provider: "yfinance"
+      enabled: true
+  computation:
+    visualization:
+      output_dir: "data/charts"
+      default_format: "png"
+      default_dpi: 150
+    report:
+      template_dir: "templates/finance"
+      output_dir: "data/reports"
